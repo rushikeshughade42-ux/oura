@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "esp-dashboard/server.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "esp-dashboard/public/**",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/data",
+      "dest": "/esp-dashboard/server.js"
+    },
+    {
+      "src": "/events",
+      "dest": "/esp-dashboard/server.js"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/esp-dashboard/public/$1"
+    }
+  ]
+}
