@@ -1,0 +1,657 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ESP32 High-Pressure Oxygen Cylinder Monitor</title>
+  <meta name="description" content="Real-time web application dashboard for ESP32 High-Pressure Oxygen Cylinder Monitor with Target Threshold Countdown.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-dark: #07090e;
+      --bg-card: rgba(15, 23, 42, 0.7);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --accent-cyan: #06b6d4;
+      --accent-blue: #3b82f6;
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --status-normal: #10b981;
+      --status-normal-glow: rgba(16, 185, 129, 0.3);
+      --status-warning: #f59e0b;
+      --status-warning-glow: rgba(245, 158, 11, 0.3);
+      --status-critical: #ef4444;
+      --status-critical-glow: rgba(239, 68, 68, 0.4);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Outfit', sans-serif;
+      background: radial-gradient(circle at top right, #0f172a 0%, #07090e 100%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 1.5rem;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 1100px;
+    }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 2rem;
+      padding-bottom: 1rem;
+      border-bottom: 1px solid var(--card-border);
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .brand-icon {
+      width: 42px;
+      height: 42px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 0 20px rgba(6, 182, 212, 0.4);
+    }
+
+    .brand-icon svg {
+      width: 24px;
+      height: 24px;
+      fill: #fff;
+    }
+
+    .title-group h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .title-group p {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .status-badge {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      background: rgba(16, 185, 129, 0.12);
+      border: 1px solid var(--status-normal-glow);
+      color: var(--status-normal);
+      padding: 0.5rem 1.1rem;
+      border-radius: 9999px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      transition: all 0.3s ease;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      background-color: var(--status-normal);
+      border-radius: 50%;
+      box-shadow: 0 0 10px var(--status-normal);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.3; transform: scale(0.85); }
+    }
+
+    /* Main Grid System */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 1.25rem;
+      width: 100%;
+    }
+
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border);
+      border-radius: 1.25rem;
+      padding: 1.5rem;
+      box-shadow: 0 10px 30px -10px rgba(0, 0, 0, 0.5);
+      transition: transform 0.25s ease, border-color 0.25s ease, box-shadow 0.25s ease;
+      position: relative;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(56, 189, 248, 0.3);
+      box-shadow: 0 15px 35px -10px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Explicit Column Spans */
+    .col-12 { grid-column: span 12 !important; }
+    .col-7  { grid-column: span 7; }
+    .col-5  { grid-column: span 5; }
+    .col-4  { grid-column: span 4; }
+
+    @media (max-width: 900px) {
+      .col-7, .col-5, .col-4 {
+        grid-column: span 12;
+      }
+    }
+
+    @media (max-width: 600px) {
+      body { padding: 0.85rem; }
+      header { flex-direction: column; align-items: flex-start; gap: 0.75rem; }
+      .title-group h1 { font-size: 1.35rem; }
+      .hero-value { font-size: 3rem; }
+      .stat-val { font-size: 1.85rem; }
+      .preset-btn { padding: 0.35rem 0.5rem; font-size: 0.75rem; }
+      .target-control-group { justify-content: flex-start; width: 100%; }
+      footer { flex-direction: column; gap: 0.5rem; align-items: flex-start; }
+    }
+
+    .hero-card {
+      background: linear-gradient(135deg, rgba(15, 23, 42, 0.8), rgba(30, 41, 59, 0.6));
+    }
+
+    .card-label {
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      width: 100%;
+    }
+
+    .hero-val-group {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+
+    .hero-value {
+      font-size: 3.75rem;
+      font-weight: 700;
+      line-height: 1;
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--text-main);
+      transition: color 0.3s ease;
+    }
+
+    .unit {
+      font-size: 1.25rem;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+
+    /* Oxygen Level Progress Bar */
+    .progress-bar-container {
+      width: 100%;
+      height: 12px;
+      background: rgba(255, 255, 255, 0.06);
+      border-radius: 999px;
+      margin-top: 1.25rem;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .progress-bar-fill {
+      height: 100%;
+      width: 100%;
+      background: linear-gradient(90deg, #10b981, #38bdf8);
+      border-radius: 999px;
+      transition: width 0.6s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease;
+      box-shadow: 0 0 12px rgba(16, 185, 129, 0.5);
+    }
+
+    .stat-val {
+      font-size: 2.25rem;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      margin-top: 0.4rem;
+    }
+
+    .stat-sub {
+      font-size: 0.825rem;
+      color: var(--text-muted);
+      margin-top: 0.4rem;
+    }
+
+    /* Target Threshold Selector */
+    .target-control-group {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+      flex-wrap: wrap;
+    }
+
+    .preset-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text-muted);
+      padding: 0.35rem 0.75rem;
+      border-radius: 6px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .preset-btn:hover, .preset-btn.active {
+      background: var(--accent-cyan);
+      color: #000;
+      border-color: var(--accent-cyan);
+    }
+
+    .target-input {
+      width: 65px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      color: var(--accent-cyan);
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 600;
+      padding: 0.3rem 0.4rem;
+      text-align: center;
+      font-size: 0.9rem;
+    }
+
+    /* Status Alert Banner */
+    .alert-banner {
+      grid-column: span 12 !important;
+      padding: 1rem 1.5rem;
+      border-radius: 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-weight: 600;
+      transition: all 0.3s ease;
+      width: 100%;
+    }
+
+    .alert-normal {
+      background: rgba(16, 185, 129, 0.1);
+      border: 1px solid rgba(16, 185, 129, 0.25);
+      color: #34d399;
+    }
+
+    .alert-warning {
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.3);
+      color: #fbbf24;
+    }
+
+    .alert-critical {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid rgba(239, 68, 68, 0.4);
+      color: #f87171;
+      animation: alertGlow 1.5s infinite alternate;
+    }
+
+    @keyframes alertGlow {
+      from { box-shadow: 0 0 10px rgba(239, 68, 68, 0.2); }
+      to { box-shadow: 0 0 25px rgba(239, 68, 68, 0.5); }
+    }
+
+    footer {
+      margin-top: 2.5rem;
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      display: flex;
+      justify-content: space-between;
+      width: 100%;
+      padding-top: 1rem;
+      border-top: 1px solid var(--card-border);
+    }
+
+    code {
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--accent-cyan);
+      background: rgba(6, 182, 212, 0.1);
+      padding: 0.2rem 0.5rem;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24">
+            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/>
+          </svg>
+        </div>
+        <div class="title-group">
+          <h1>ESP32 Oxygen Monitor</h1>
+          <p>Real-Time High-Pressure Cylinder Telemetry</p>
+        </div>
+      </div>
+
+      <div class="header-actions">
+        <div class="status-badge" id="connBadge">
+          <div class="status-dot" id="statusDot"></div>
+          <span id="connStatus">Connecting...</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <!-- Hero Card: Oxygen Level (7 Cols) -->
+      <div class="card hero-card col-7">
+        <div>
+          <div class="card-label">
+            <span>Oxygen Percentage</span>
+            <span id="systemStatusLabel" style="font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 99px; background: rgba(16,185,129,0.15); color: #10b981;">NORMAL</span>
+          </div>
+          <div class="hero-val-group">
+            <span class="hero-value" id="o2Percent">100.0</span>
+            <span class="unit">%</span>
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="o2Progress" style="width: 100%;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pressure BAR (5 Cols) -->
+      <div class="card col-5">
+        <div>
+          <div class="card-label">Transducer Pressure</div>
+          <div class="stat-val" style="color: var(--accent-cyan);" id="pressureBar">-- <span class="unit">BAR</span></div>
+        </div>
+        <div class="stat-sub">Nominal Full: 200 BAR | Max: 250 BAR</div>
+      </div>
+
+      <!-- Remaining Liters (4 Cols) -->
+      <div class="card col-4">
+        <div>
+          <div class="card-label">Remaining Gas Volume</div>
+          <div class="stat-val" id="remainingLiters">-- <span class="unit">Liters</span></div>
+        </div>
+        <div class="stat-sub">10L Water Capacity Cylinder</div>
+      </div>
+
+      <!-- Flow Rate (4 Cols) -->
+      <div class="card col-4">
+        <div>
+          <div class="card-label">Estimated Flow Rate</div>
+          <div class="stat-val" style="color: #60a5fa;" id="flowRate">-- <span class="unit">L/min</span></div>
+        </div>
+        <div class="stat-sub">Calculated consumption gradient</div>
+      </div>
+
+      <!-- Time Remaining to Empty (4 Cols) -->
+      <div class="card col-4">
+        <div>
+          <div class="card-label">Time to Empty (0%)</div>
+          <div class="stat-val" style="color: #a78bfa;" id="timeRemaining">-- <span class="unit">mins</span></div>
+        </div>
+        <div class="stat-sub" id="timeRemainingHuman">Duration estimation</div>
+      </div>
+
+      <!-- Target Threshold Countdown Card (Full Width - 12 Cols) -->
+      <div class="card col-12" style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8)); border-color: rgba(6, 182, 212, 0.3);">
+        <div class="card-label">
+          <span>Target Threshold Countdown</span>
+          <span style="color: var(--accent-cyan); font-weight: 500;" id="targetLabelDisplay">Time to reach 20%</span>
+        </div>
+
+        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1.25rem; margin-top: 0.5rem;">
+          <div>
+            <div class="stat-val" style="color: #f59e0b;" id="timeToTargetVal">-- <span class="unit">mins</span></div>
+            <div class="stat-sub" id="timeToTargetHuman">Select target alert level below</div>
+          </div>
+
+          <!-- Target Level Selector Controls -->
+          <div>
+            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.4rem; text-transform: uppercase;">Set Alert Threshold (%)</div>
+            <div class="target-control-group">
+              <button class="preset-btn" onclick="setTargetPercent(10)">10%</button>
+              <button class="preset-btn" onclick="setTargetPercent(15)">15%</button>
+              <button class="preset-btn active" id="btn20" onclick="setTargetPercent(20)">20%</button>
+              <button class="preset-btn" onclick="setTargetPercent(25)">25%</button>
+              <button class="preset-btn" onclick="setTargetPercent(30)">30%</button>
+              <input type="number" id="customTargetInput" class="target-input" value="20" min="1" max="99" onchange="setTargetPercent(this.value)">
+              <span style="font-size: 0.85rem; color: var(--accent-cyan); font-weight: 600;">%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- System Status Banner (Full Width - 12 Cols) -->
+      <div class="alert-banner alert-normal col-12" id="alertBanner">
+        <span id="alertMsg">System Operating Normally - Adequate Oxygen Supply</span>
+        <span id="lastPacketTime" style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; opacity: 0.8;">--:--:--</span>
+      </div>
+    </div>
+
+    <footer>
+      <div>ESP32 Device Endpoint: <code>/data</code></div>
+      <div>Live Stream: Server-Sent Events (SSE)</div>
+    </footer>
+  </div>
+
+  <script>
+    const connBadge = document.getElementById('connBadge');
+    const statusDot = document.getElementById('statusDot');
+    const connStatus = document.getElementById('connStatus');
+    const systemStatusLabel = document.getElementById('systemStatusLabel');
+
+    const o2Percent = document.getElementById('o2Percent');
+    const o2Progress = document.getElementById('o2Progress');
+    const pressureBar = document.getElementById('pressureBar');
+    const remainingLiters = document.getElementById('remainingLiters');
+    const flowRate = document.getElementById('flowRate');
+    const timeRemaining = document.getElementById('timeRemaining');
+    const timeRemainingHuman = document.getElementById('timeRemainingHuman');
+
+    const targetLabelDisplay = document.getElementById('targetLabelDisplay');
+    const timeToTargetVal = document.getElementById('timeToTargetVal');
+    const timeToTargetHuman = document.getElementById('timeToTargetHuman');
+    const customTargetInput = document.getElementById('customTargetInput');
+
+    const alertBanner = document.getElementById('alertBanner');
+    const alertMsg = document.getElementById('alertMsg');
+    const lastPacketTime = document.getElementById('lastPacketTime');
+
+    let currentTargetPercent = 20.0;
+    let latestTelemetry = null;
+
+    function setTargetPercent(val) {
+      const num = parseFloat(val);
+      if (isNaN(num) || num < 1 || num > 99) return;
+      currentTargetPercent = num;
+      customTargetInput.value = num;
+
+      // Update button active state
+      document.querySelectorAll('.preset-btn').forEach(btn => {
+        btn.classList.toggle('active', parseFloat(btn.textContent) === num);
+      });
+
+      targetLabelDisplay.textContent = `Time to reach ${num}%`;
+      if (latestTelemetry) {
+        updateDashboard(latestTelemetry);
+      }
+    }
+
+    // Math helper to convert Oxygen % to BAR pressure
+    function percentageToBar(percent) {
+      const EMPTY_BAR = 10.0;
+      const FULL_BAR  = 200.0;
+      if (percent <= 0) return EMPTY_BAR;
+      if (percent >= 100) return FULL_BAR;
+      return EMPTY_BAR + (percent / 100.0) * (FULL_BAR - EMPTY_BAR);
+    }
+
+    function calculateTimeToTargetMins(currentBar, targetPercent, flowRateLmin) {
+      const targetBar = percentageToBar(targetPercent);
+      if (currentBar <= targetBar) return 0;
+
+      const CYLINDER_WATER_VOL_L = 10.0;
+      const currentLiters = CYLINDER_WATER_VOL_L * currentBar;
+      const targetLiters  = CYLINDER_WATER_VOL_L * targetBar;
+      const volumeToConsume = currentLiters - targetLiters;
+
+      const activeFlow = (flowRateLmin > 0.1) ? flowRateLmin : 5.0; // Default 5.0 L/min baseline
+      return volumeToConsume / activeFlow;
+    }
+
+    function updateDashboard(data) {
+      latestTelemetry = data;
+
+      const currentBar = (data.pressure_bar !== undefined) ? parseFloat(data.pressure_bar) : 0;
+      const currentO2  = (data.oxygen_percent !== undefined) ? parseFloat(data.oxygen_percent) : 0;
+      const currentFlow = (data.flow_rate_lmin !== undefined) ? parseFloat(data.flow_rate_lmin) : 0;
+
+      // 1. Oxygen Percentage
+      if (data.oxygen_percent !== undefined) {
+        o2Percent.textContent = currentO2.toFixed(1);
+        const clampVal = Math.min(Math.max(currentO2, 0), 100);
+        o2Progress.style.width = `${clampVal}%`;
+
+        // Dynamic Color Logic
+        if (currentO2 <= 15.0) {
+          o2Progress.style.background = 'linear-gradient(90deg, #ef4444, #f87171)';
+          o2Percent.style.color = '#ef4444';
+        } else if (currentO2 <= 30.0) {
+          o2Progress.style.background = 'linear-gradient(90deg, #f59e0b, #fbbf24)';
+          o2Percent.style.color = '#f59e0b';
+        } else {
+          o2Progress.style.background = 'linear-gradient(90deg, #10b981, #38bdf8)';
+          o2Percent.style.color = '#f8fafc';
+        }
+      }
+
+      // 2. Pressure BAR
+      if (data.pressure_bar !== undefined) {
+        pressureBar.innerHTML = `${currentBar.toFixed(1)} <span class="unit">BAR</span>`;
+      }
+
+      // 3. Remaining Liters
+      if (data.remaining_liters !== undefined) {
+        remainingLiters.innerHTML = `${Math.round(data.remaining_liters)} <span class="unit">L</span>`;
+      }
+
+      // 4. Flow Rate
+      if (data.flow_rate_lmin !== undefined) {
+        flowRate.innerHTML = `${currentFlow.toFixed(1)} <span class="unit">L/min</span>`;
+      } else {
+        flowRate.innerHTML = `0.0 <span class="unit">L/min</span>`;
+      }
+
+      // 5. Time Remaining to Empty (0%)
+      if (data.time_remaining_mins !== undefined) {
+        const mins = Math.round(data.time_remaining_mins);
+        timeRemaining.innerHTML = `${mins} <span class="unit">mins</span>`;
+
+        const hrs = Math.floor(mins / 60);
+        const remMins = mins % 60;
+        timeRemainingHuman.textContent = hrs > 0 ? `~ ${hrs}h ${remMins}m remaining to empty` : `~ ${remMins}m remaining to empty`;
+      }
+
+      // 6. Time Remaining to Custom Target Percentage (e.g. 20%)
+      const targetMins = Math.round(calculateTimeToTargetMins(currentBar, currentTargetPercent, currentFlow));
+      if (currentO2 <= currentTargetPercent) {
+        timeToTargetVal.innerHTML = `<span style="color: #ef4444;">THRESHOLD REACHED</span>`;
+        timeToTargetHuman.textContent = `Oxygen level is currently at or below target ${currentTargetPercent}%`;
+      } else {
+        timeToTargetVal.innerHTML = `${targetMins} <span class="unit">mins</span>`;
+        const targetHrs = Math.floor(targetMins / 60);
+        const targetRemMins = targetMins % 60;
+        timeToTargetHuman.textContent = targetHrs > 0 
+          ? `~ ${targetHrs}h ${targetRemMins}m remaining until reaching ${currentTargetPercent}%`
+          : `~ ${targetRemMins}m remaining until reaching ${currentTargetPercent}%`;
+      }
+
+      // 7. Status String & Alerts
+      const status = data.status || 'NORMAL';
+      systemStatusLabel.textContent = status;
+
+      alertBanner.className = 'alert-banner col-12';
+      if (status === 'CRITICAL' || currentO2 <= 15.0) {
+        alertBanner.classList.add('alert-critical');
+        alertMsg.textContent = 'CRITICAL ALERT: Oxygen level depleted! Replace cylinder immediately!';
+        systemStatusLabel.style.background = 'rgba(239, 68, 68, 0.2)';
+        systemStatusLabel.style.color = '#ef4444';
+      } else if (status === 'LOW' || currentO2 <= currentTargetPercent) {
+        alertBanner.classList.add('alert-warning');
+        alertMsg.textContent = `WARNING: Oxygen level has reached or is approaching target threshold (${currentTargetPercent}%).`;
+        systemStatusLabel.style.background = 'rgba(245, 158, 11, 0.2)';
+        systemStatusLabel.style.color = '#f59e0b';
+      } else {
+        alertBanner.classList.add('alert-normal');
+        alertMsg.textContent = 'System Operating Normally - Adequate Oxygen Supply';
+        systemStatusLabel.style.background = 'rgba(16, 185, 129, 0.15)';
+        systemStatusLabel.style.color = '#10b981';
+      }
+
+      // 8. Timestamp
+      if (data.timestamp) {
+        lastPacketTime.textContent = `Last update: ${data.timestamp}`;
+      }
+    }
+
+    // Connect Server-Sent Events (SSE)
+    const evtSource = new EventSource('/events');
+
+    evtSource.onopen = function() {
+      connStatus.textContent = 'ESP32 Stream Active';
+      connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+      statusDot.style.backgroundColor = '#10b981';
+      statusDot.style.boxShadow = '0 0 10px #10b981';
+    };
+
+    evtSource.onmessage = function(event) {
+      try {
+        const data = JSON.parse(event.data);
+        updateDashboard(data);
+      } catch (e) {
+        console.error("Error parsing EventSource telemetry JSON:", e);
+      }
+    };
+
+    evtSource.onerror = function() {
+      connStatus.textContent = 'Reconnecting...';
+      connBadge.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+      statusDot.style.backgroundColor = '#ef4444';
+      statusDot.style.boxShadow = '0 0 10px #ef4444';
+    };
+  </script>
+</body>
+</html>

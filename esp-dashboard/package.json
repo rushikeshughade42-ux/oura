@@ -1,0 +1,19 @@
+{
+  "name": "esp-oxygen-dashboard",
+  "version": "1.0.0",
+  "description": "Real-time ESP32 High-Pressure Oxygen Cylinder Live Telemetry Dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "esp32",
+    "oxygen-monitor",
+    "telemetry",
+    "sse",
+    "dashboard"
+  ],
+  "author": "",
+  "license": "ISC"
+}
