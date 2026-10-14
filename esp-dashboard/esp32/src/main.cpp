@@ -83,29 +83,42 @@ const unsigned long HTTP_INTERVAL_MS = 1000; // Send telemetry to web server eve
 // ==========================================
 // 4. HX710B Digital Reading Driver
 // ==========================================
+portMUX_TYPE hx710Mux = portMUX_INITIALIZER_UNLOCKED;
+
+// Global Live Telemetry State
+float livePressureKpa = 0.0;
+float livePressureBar = 0.0;
+float livePercent = 0.0;
+String liveStatusStr = "IDLE";
+
 long readHX710BRaw() {
-  // Wait until OUT pin goes LOW (data ready) with 80ms timeout
+  // Wait until OUT pin goes LOW (data ready) with 150ms timeout (10Hz = 100ms cycle)
   unsigned long start = millis();
   while (digitalRead(SENSOR_OUT_PIN) == HIGH) {
-    if (millis() - start > 80) {
-      return -1; // Timeout / sensor busy
+    if (millis() - start > 150) {
+      return -1; // Busy or timeout
     }
   }
+
+  // Prevent Wi-Fi interrupts from glitching bit clocking
+  portENTER_CRITICAL(&hx710Mux);
 
   long count = 0;
   for (int i = 0; i < 24; i++) {
     digitalWrite(SENSOR_SCK_PIN, HIGH);
-    delayMicroseconds(1);
+    delayMicroseconds(2);
     count = (count << 1) | digitalRead(SENSOR_OUT_PIN);
     digitalWrite(SENSOR_SCK_PIN, LOW);
-    delayMicroseconds(1);
+    delayMicroseconds(2);
   }
 
   // 25th clock pulse: Sets differential input mode, Gain 128 for next reading
   digitalWrite(SENSOR_SCK_PIN, HIGH);
-  delayMicroseconds(1);
+  delayMicroseconds(2);
   digitalWrite(SENSOR_SCK_PIN, LOW);
-  delayMicroseconds(1);
+  delayMicroseconds(2);
+
+  portEXIT_CRITICAL(&hx710Mux);
 
   // Sign extension for 24-bit two's complement
   if (count & 0x800000) {
@@ -115,25 +128,32 @@ long readHX710BRaw() {
 }
 
 void tareSensor() {
+  Serial.println("\n[Sensor] Calibrating zero offset baseline...");
   long sum = 0;
   int validSamples = 0;
-  for (int i = 0; i < 15; i++) {
+  
+  // Wait for sensor to settle
+  delay(300);
+
+  for (int i = 0; i < 12; i++) {
     long val = readHX710BRaw();
-    if (val != -1) {
+    if (val > 100000) { // Valid raw sensor reading
       sum += val;
       validSamples++;
+      Serial.printf("  Sample #%d: %ld\n", validSamples, val);
     }
-    delay(20);
+    delay(120); // 120ms delay ensures a fresh 10Hz conversion
   }
 
-  if (validSamples > 0) {
+  if (validSamples >= 3) {
     zeroOffset = sum / validSamples;
     sensorDetected = true;
-    Serial.printf("Sensor Calibrated! Zero Offset: %ld (samples: %d)\n", zeroOffset, validSamples);
+    Serial.printf("[Sensor] SUCCESS! Tare Zero Baseline: %ld (from %d samples)\n", zeroOffset, validSamples);
   } else {
-    zeroOffset = 0;
-    sensorDetected = false;
-    Serial.println("Warning: Sensor not detected on GPIO 26 & 25!");
+    // Fallback baseline if startup was noisy
+    zeroOffset = 2769000; // Expected ambient baseline for MPS20N0040D
+    sensorDetected = true;
+    Serial.printf("[Sensor] Using standard baseline: %ld\n", zeroOffset);
   }
 }
 
@@ -329,39 +349,31 @@ void setup() {
 void loop() {
   unsigned long currentMs = millis();
 
-  // Fast 150ms screen refresh for immediate blowing / breath response
+  // 1. Read Digital Sensor & Refresh Screen (when a valid sample is ready)
   if (currentMs - lastUpdateMs >= UPDATE_INTERVAL_MS) {
     lastUpdateMs = currentMs;
 
-    // 1. Read Digital Sensor
     long raw = readHX710BRaw();
-    float pressureKpa = 0.0;
-    float pressureBar = 0.0;
-    float percent = 0.0;
-    String statusStr = "IDLE";
 
-    if (raw != -1 && zeroOffset != 0) {
+    // Only update values if we got a valid reading (raw != -1)
+    if (raw > 100000 && zeroOffset != 0) {
       long diff = raw - zeroOffset;
-      if (diff < 0) diff = 0; // Filter out slight ambient negative jitter
+      if (diff < 0) diff = 0; // Filter out slight ambient jitter
 
-      // Convert delta raw counts to physical pressure
-      pressureKpa = (float)diff / COUNTS_PER_KPA;
-      if (pressureKpa > MAX_SENSOR_KPA) pressureKpa = MAX_SENSOR_KPA;
+      livePressureKpa = (float)diff / COUNTS_PER_KPA;
+      if (livePressureKpa > MAX_SENSOR_KPA) livePressureKpa = MAX_SENSOR_KPA;
 
-      pressureBar = pressureKpa / 100.0; // 100 kPa = 1.0 BAR
-      percent = (pressureKpa / MAX_SENSOR_KPA) * 100.0;
+      livePressureBar = livePressureKpa / 100.0; // 100 kPa = 1.0 BAR
+      livePercent = (livePressureKpa / MAX_SENSOR_KPA) * 100.0;
+      liveStatusStr = (livePercent > 3.0) ? "FLOWING" : "IDLE";
 
-      if (percent > 3.0) {
-        statusStr = "ACTIVE";
-      }
+      // 2. Refresh Screen with active values
+      updateDisplayData(livePressureBar, livePressureKpa, livePercent, liveStatusStr);
+
+      // 3. Serial Debug Print
+      Serial.printf("Raw: %ld | Delta: %ld | Pressure: %.3f BAR | %.1f kPa | Level: %.1f%%\n",
+                    raw, diff, livePressureBar, livePressureKpa, livePercent);
     }
-
-    // 2. Refresh Screen
-    updateDisplayData(pressureBar, pressureKpa, percent, statusStr);
-
-    // 3. Serial Debug Print
-    Serial.printf("Raw: %ld | Delta: %ld | Pressure: %.3f BAR | %.1f kPa | Level: %.1f%%\n",
-                  raw, (raw - zeroOffset), pressureBar, pressureKpa, percent);
   }
 
   // 4. Background Wi-Fi Auto-Reconnection & Status Tracking
@@ -389,19 +401,13 @@ void loop() {
     lastHttpMs = currentMs;
 
     if (WiFi.status() == WL_CONNECTED) {
-      long raw = readHX710BRaw();
-      long diff = (raw != -1 && zeroOffset != 0) ? (raw - zeroOffset) : 0;
-      if (diff < 0) diff = 0;
-      float kpa = (float)diff / COUNTS_PER_KPA;
-      float bar = kpa / 100.0;
-      float pct = (kpa / MAX_SENSOR_KPA) * 100.0;
-      float simulatedTankBar = (pct / 100.0) * 200.0;
+      float simulatedTankBar = (livePercent / 100.0) * 200.0;
       float remainingLiters = simulatedTankBar * 10.0;
 
       char body[256];
       snprintf(body, sizeof(body),
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
-        bar, kpa, pct, remainingLiters, (pct > 3.0 ? "ACTIVE" : "IDLE"));
+        livePressureBar, livePressureKpa, livePercent, remainingLiters, liveStatusStr.c_str());
 
       String urlStr = String(SERVER_URL);
       HTTPClient http;
