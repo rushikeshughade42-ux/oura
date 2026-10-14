@@ -31,83 +31,88 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 // ==========================================
 const char* WIFI_SSID  = "Rushikesh";
 const char* WIFI_PASS  = "";
-const char* SERVER_URL = "http://10.165.255.7:3000/data";
+// Local Machine IP or your Vercel deployment URL (e.g. "https://your-app.vercel.app/data")
+const char* SERVER_URL = "http://10.20.235.7:3000/data";
 
 // ==========================================
-// 3. Sensor & Cylinder Parameters
+// 3. Digital Air Pressure Sensor (MPS20N0040D + HX710B)
 // ==========================================
-const int SENSOR_PIN = 34;
-const float VOLTAGE_DIVIDER_RATIO = 1.50;
-const float SENSOR_MIN_VOLTAGE    = 0.50;
-const float SENSOR_MAX_VOLTAGE    = 4.50;
-const float SENSOR_MAX_BAR        = 250.0;
-const float FULL_CYLINDER_BAR     = 200.0;
-const float EMPTY_CYLINDER_BAR    = 10.0;
-const float CYLINDER_WATER_VOL_L  = 10.0;
+#define SENSOR_OUT_PIN  26  // Data Pin (OUT) -> GPIO 26
+#define SENSOR_SCK_PIN  25  // Clock Pin (SCK) -> GPIO 25
 
-// Moving average smoothing
-const int NUM_READINGS = 20;
-float readings[NUM_READINGS];
-int readIndex = 0;
-float total = 0.0;
+// Sensor Specifications: 0 to 40 kPa (0 to 0.40 BAR)
+const float MAX_SENSOR_KPA = 40.0;
+const float MAX_SENSOR_BAR = 0.40;
+const float COUNTS_PER_KPA = 75000.0; // Calibration scale factor for HX710B 24-bit ADC
+
+long zeroOffset = 0;
+bool sensorDetected = false;
 
 unsigned long lastUpdateMs = 0;
-const unsigned long UPDATE_INTERVAL_MS = 1000;
+const unsigned long UPDATE_INTERVAL_MS = 150; // Fast 150ms screen refresh for instant breath response
 
-// Previous values for flow rate and estimation tracking
-float prevBar = -1.0;
-float prevPercent = -1.0;
-unsigned long previousTimeMs = 0;
-float estimatedFlowRateLmin = 0.0;
+unsigned long lastHttpMs = 0;
+const unsigned long HTTP_INTERVAL_MS = 1000; // Send telemetry to web server every 1 second
 
 // ==========================================
-// 4. Helper Functions
+// 4. HX710B Digital Reading Driver
 // ==========================================
-float getSmoothedTransducerVoltage() {
-  uint32_t rawMv = analogReadMilliVolts(SENSOR_PIN);
-  float espVoltage = rawMv / 1000.0;
-  float actualVoltage = espVoltage * VOLTAGE_DIVIDER_RATIO;
+long readHX710BRaw() {
+  // Wait until OUT pin goes LOW (data ready) with 80ms timeout
+  unsigned long start = millis();
+  while (digitalRead(SENSOR_OUT_PIN) == HIGH) {
+    if (millis() - start > 80) {
+      return -1; // Timeout / sensor busy
+    }
+  }
 
-  total = total - readings[readIndex];
-  readings[readIndex] = actualVoltage;
-  total = total + readings[readIndex];
-  readIndex = (readIndex + 1) % NUM_READINGS;
+  long count = 0;
+  for (int i = 0; i < 24; i++) {
+    digitalWrite(SENSOR_SCK_PIN, HIGH);
+    delayMicroseconds(1);
+    count = (count << 1) | digitalRead(SENSOR_OUT_PIN);
+    digitalWrite(SENSOR_SCK_PIN, LOW);
+    delayMicroseconds(1);
+  }
 
-  return (total / NUM_READINGS);
+  // 25th clock pulse: Sets differential input mode, Gain 128 for next reading
+  digitalWrite(SENSOR_SCK_PIN, HIGH);
+  delayMicroseconds(1);
+  digitalWrite(SENSOR_SCK_PIN, LOW);
+  delayMicroseconds(1);
+
+  // Sign extension for 24-bit two's complement
+  if (count & 0x800000) {
+    count |= 0xFF000000;
+  }
+  return count;
 }
 
-float voltageToBar(float voltage) {
-  if (voltage <= SENSOR_MIN_VOLTAGE) return 0.0;
-  if (voltage >= SENSOR_MAX_VOLTAGE) return SENSOR_MAX_BAR;
-  return ((voltage - SENSOR_MIN_VOLTAGE) / (SENSOR_MAX_VOLTAGE - SENSOR_MIN_VOLTAGE)) * SENSOR_MAX_BAR;
-}
+void tareSensor() {
+  long sum = 0;
+  int validSamples = 0;
+  for (int i = 0; i < 15; i++) {
+    long val = readHX710BRaw();
+    if (val != -1) {
+      sum += val;
+      validSamples++;
+    }
+    delay(20);
+  }
 
-float barToPercentage(float bar) {
-  if (bar <= EMPTY_CYLINDER_BAR) return 0.0;
-  if (bar >= FULL_CYLINDER_BAR) return 100.0;
-  return ((bar - EMPTY_CYLINDER_BAR) / (FULL_CYLINDER_BAR - EMPTY_CYLINDER_BAR)) * 100.0;
-}
-
-float percentageToBar(float percent) {
-  if (percent <= 0.0) return EMPTY_CYLINDER_BAR;
-  if (percent >= 100.0) return FULL_CYLINDER_BAR;
-  return EMPTY_CYLINDER_BAR + (percent / 100.0) * (FULL_CYLINDER_BAR - EMPTY_CYLINDER_BAR);
-}
-
-float getTimeToTargetPercent(float currentBar, float targetPercent, float flowRateLmin) {
-  float targetBar = percentageToBar(targetPercent);
-  if (currentBar <= targetBar) return 0.0;
-  
-  float currentLiters = CYLINDER_WATER_VOL_L * currentBar;
-  float targetLiters  = CYLINDER_WATER_VOL_L * targetBar;
-  float volumeToConsume = currentLiters - targetLiters;
-  
-  float activeFlowRate = (flowRateLmin > 0.1) ? flowRateLmin : 5.0;
-  return volumeToConsume / activeFlowRate;
+  if (validSamples > 0) {
+    zeroOffset = sum / validSamples;
+    sensorDetected = true;
+    Serial.printf("Sensor Calibrated! Zero Offset: %ld (samples: %d)\n", zeroOffset, validSamples);
+  } else {
+    zeroOffset = 0;
+    sensorDetected = false;
+    Serial.println("Warning: Sensor not detected on GPIO 26 & 25!");
+  }
 }
 
 // ==========================================
-// 5. TFT UI Drawing Functions (ST7789 True 320x240 Landscape)
+// 5. TFT UI Drawing Functions (320x240 ST7789)
 // ==========================================
 void drawStaticDashboardUI() {
   tft.fillScreen(ILI9341_BLACK);
@@ -119,14 +124,14 @@ void drawStaticDashboardUI() {
   tft.setCursor(8, 6);
   tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(2);
-  tft.print("OXYGEN MONITOR");
+  tft.print("AIR PRESSURE MONITOR");
 
-  // 2. Top-Left Box: Oxygen Level Hero (Width: 152, Height: 98)
+  // 2. Top-Left Box: Air Pressure % (Width: 152, Height: 98)
   tft.drawRoundRect(4, 32, 152, 98, 6, ILI9341_DARKGREY);
   tft.setCursor(10, 38);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  tft.print("OXYGEN LEVEL");
+  tft.print("PRESSURE LEVEL");
 
   // 3. Top-Right Box: Pressure BAR (Width: 156, Height: 98)
   tft.drawRoundRect(160, 32, 156, 98, 6, ILI9341_DARKGREY);
@@ -135,94 +140,104 @@ void drawStaticDashboardUI() {
   tft.setTextSize(1);
   tft.print("PRESSURE (BAR)");
 
-  // 4. Bottom-Left Box: Remaining Volume (Width: 152, Height: 102)
+  // 4. Bottom-Left Box: Pressure in kPa (Width: 152, Height: 102)
   tft.drawRoundRect(4, 134, 152, 102, 6, ILI9341_DARKGREY);
   tft.setCursor(10, 140);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  tft.print("REMAINING VOL");
+  tft.print("PRESSURE (kPa)");
 
-  // 5. Bottom-Right Box: Time to Empty (Width: 156, Height: 102)
+  // 5. Bottom-Right Box: Sensor Status (Width: 156, Height: 102)
   tft.drawRoundRect(160, 134, 156, 102, 6, ILI9341_DARKGREY);
   tft.setCursor(166, 140);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  tft.print("TIME TO EMPTY");
+  tft.print("AIR FLOW STATUS");
 }
 
-void updateDisplayData(float currentBar, float percent, float liters, float timeRemainingMins, String statusStr) {
-  uint16_t percentColor = ILI9341_GREEN;
-  if (percent <= 15.0) percentColor = ILI9341_RED;
-  else if (percent <= 30.0) percentColor = ILI9341_YELLOW;
+void updateDisplayData(float currentBar, float currentKpa, float percent, String statusStr) {
+  uint16_t color = ILI9341_GREEN;
+  if (percent > 60.0) color = ILI9341_YELLOW;
+  if (percent > 85.0) color = ILI9341_RED;
 
-  // --- 1. Top-Left Box: Oxygen Percentage ---
-  tft.fillRect(90, 36, 62, 12, ILI9341_BLACK);
-  tft.setCursor(92, 38);
-  tft.setTextColor(percentColor);
+  // --- 1. Top-Left Box: Pressure % & Progress Bar ---
+  tft.fillRect(95, 36, 58, 12, ILI9341_BLACK);
+  tft.setCursor(95, 38);
+  tft.setTextColor(color);
   tft.setTextSize(1);
   tft.print(statusStr);
 
   tft.fillRect(10, 52, 140, 36, ILI9341_BLACK);
   tft.setCursor(10, 54);
-  tft.setTextColor(percentColor);
+  tft.setTextColor(color);
   tft.setTextSize(3);
   tft.printf("%.1f", percent);
   tft.setTextSize(2);
   tft.print("%");
 
+  // Progress Bar
   tft.drawRect(10, 94, 140, 12, ILI9341_DARKGREY);
   tft.fillRect(11, 95, 138, 10, ILI9341_BLACK);
   int barW = (int)((percent / 100.0) * 138.0);
   if (barW > 138) barW = 138;
-  if (barW > 0) tft.fillRect(11, 95, barW, 10, percentColor);
+  if (barW > 0) tft.fillRect(11, 95, barW, 10, color);
 
-  // --- 2. Top-Right Box: Pressure (BAR) ---
+  // --- 2. Top-Right Box: Pressure (BAR with 3 Decimals) ---
   tft.fillRect(166, 54, 144, 40, ILI9341_BLACK);
   tft.setCursor(166, 56);
   tft.setTextColor(ILI9341_CYAN);
   tft.setTextSize(3);
-  tft.printf("%.1f", currentBar);
+  tft.printf("%.3f", currentBar);
   tft.setTextSize(1);
   tft.print(" BAR");
 
+  tft.fillRect(166, 104, 144, 12, ILI9341_BLACK);
   tft.setCursor(166, 104);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  tft.print("(0-250 BAR Max)");
+  tft.print("Max: 0.400 BAR");
 
-  // --- 3. Bottom-Left Box: Volume (Liters) ---
+  // --- 3. Bottom-Left Box: Pressure in kPa ---
   tft.fillRect(10, 156, 140, 40, ILI9341_BLACK);
   tft.setCursor(10, 158);
   tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(3);
-  tft.printf("%.0f", liters);
+  tft.printf("%.1f", currentKpa);
   tft.setTextSize(1);
-  tft.print(" L");
+  tft.print(" kPa");
 
+  tft.fillRect(10, 206, 140, 12, ILI9341_BLACK);
   tft.setCursor(10, 206);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  tft.print("10L Water Vol");
+  tft.print("Range: 0-40 kPa");
 
-  // --- 4. Bottom-Right Box: Time to Empty (Mins) ---
+  // --- 4. Bottom-Right Box: Live Status ---
   tft.fillRect(166, 156, 144, 40, ILI9341_BLACK);
-  tft.setCursor(166, 158);
-  tft.setTextColor(ILI9341_YELLOW);
-  tft.setTextSize(3);
-  tft.printf("%.0f", timeRemainingMins);
-  tft.setTextSize(1);
-  tft.print(" Mins");
+  tft.setCursor(166, 160);
+  if (percent > 3.0) {
+    tft.setTextColor(ILI9341_GREEN);
+    tft.setTextSize(2);
+    tft.print("FLOWING");
+  } else {
+    tft.setTextColor(ILI9341_LIGHTGREY);
+    tft.setTextSize(2);
+    tft.print("IDLE");
+  }
 
-  int hrs = (int)(timeRemainingMins / 60);
-  int remM = (int)timeRemainingMins % 60;
   tft.fillRect(166, 204, 144, 14, ILI9341_BLACK);
   tft.setCursor(166, 206);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  tft.printf("~%dh %dm left", hrs, remM);
+  if (sensorDetected) {
+    tft.print("Sensor: READY");
+  } else {
+    tft.setTextColor(ILI9341_RED);
+    tft.print("Check Pins G26/25");
+  }
 }
 
-void updateWifiStatusUI(bool connected, String ipStr) {
+void updateWifiStatusUI(bool connected) {
   tft.fillRect(230, 4, 85, 20, ILI9341_NAVY);
   tft.setCursor(235, 9);
   tft.setTextSize(1);
@@ -241,26 +256,35 @@ void updateWifiStatusUI(bool connected, String ipStr) {
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n--- Initializing ESP32 Oxygen Monitor & ST7789 TFT Display ---");
+  Serial.println("\n--- Initializing ESP32 Air Pressure Monitor & ST7789 TFT Display ---");
 
-  // Initialize ADC
-  analogReadResolution(12);
-  pinMode(SENSOR_PIN, INPUT);
-  for (int i = 0; i < NUM_READINGS; i++) readings[i] = 0.0;
+  // Configure Digital Sensor Pins
+  pinMode(SENSOR_SCK_PIN, OUTPUT);
+  pinMode(SENSOR_OUT_PIN, INPUT);
+  digitalWrite(SENSOR_SCK_PIN, LOW);
 
   // Initialize ST7789 TFT Display in Landscape Mode (320x240)
-  tft.init(240, 320); // Initialize ST7789 panel resolution
-  tft.setRotation(1); // Set True Landscape mode (320x240)
-  tft.invertDisplay(false); // Disable hardware color inversion for deep dark background
+  tft.init(240, 320);
+  tft.setRotation(1);
+  tft.invertDisplay(false);
   drawStaticDashboardUI();
 
-  // Connect to Wi-Fi
+  // Show "Calibrating..." notice on screen
+  tft.setCursor(166, 160);
+  tft.setTextColor(ILI9341_YELLOW);
+  tft.setTextSize(2);
+  tft.print("CALIBRATING");
+  delay(200);
+
+  // Auto-Tare the sensor at startup (zero baseline)
+  tareSensor();
+
+  // Connect to Wi-Fi non-blocking attempt
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID);
-  
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
   Serial.print("Connecting to Wi-Fi");
   int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 20) {
+  while (WiFi.status() != WL_CONNECTED && tries < 6) { // Quick 3-sec check
     delay(500);
     Serial.print(".");
     tries++;
@@ -268,76 +292,76 @@ void setup() {
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWiFi Connected! IP: " + WiFi.localIP().toString());
-    updateWifiStatusUI(true, WiFi.localIP().toString());
+    updateWifiStatusUI(true);
   } else {
-    Serial.println("\nWiFi connection pending...");
-    updateWifiStatusUI(false, "");
+    Serial.println("\nWiFi connection pending (running offline mode)...");
+    updateWifiStatusUI(false);
   }
 }
 
 void loop() {
   unsigned long currentMs = millis();
+
+  // Fast 150ms screen refresh for immediate blowing / breath response
   if (currentMs - lastUpdateMs >= UPDATE_INTERVAL_MS) {
     lastUpdateMs = currentMs;
 
-    // 1. Read Transducer Data
-    float voltage = getSmoothedTransducerVoltage();
-    float currentBar = voltageToBar(voltage);
+    // 1. Read Digital Sensor
+    long raw = readHX710BRaw();
+    float pressureKpa = 0.0;
+    float pressureBar = 0.0;
+    float percent = 0.0;
+    String statusStr = "IDLE";
 
-    // If transducer isn't active/connected yet, generate test demonstration values
-    if (voltage < 0.2) {
-      currentBar = 185.0 + (random(-30, 30) / 10.0); // Demo ~185 BAR
-    }
+    if (raw != -1 && zeroOffset != 0) {
+      long diff = raw - zeroOffset;
+      if (diff < 0) diff = 0; // Filter out slight ambient negative jitter
 
-    float oxygenPercent = barToPercentage(currentBar);
-    float remainingLiters = CYLINDER_WATER_VOL_L * currentBar;
+      // Convert delta raw counts to physical pressure
+      pressureKpa = (float)diff / COUNTS_PER_KPA;
+      if (pressureKpa > MAX_SENSOR_KPA) pressureKpa = MAX_SENSOR_KPA;
 
-    // 2. Flow Rate & Time Remaining Calculation
-    if (prevBar > 0.0 && currentMs > previousTimeMs) {
-      float timeDiffMinutes = (currentMs - previousTimeMs) / 60000.0;
-      float barDrop = prevBar - currentBar;
-      
-      if (barDrop > 0.1 && timeDiffMinutes > 0) {
-        float instantaneousFlowRate = (barDrop * CYLINDER_WATER_VOL_L) / timeDiffMinutes;
-        estimatedFlowRateLmin = (estimatedFlowRateLmin * 0.8) + (instantaneousFlowRate * 0.2);
+      pressureBar = pressureKpa / 100.0; // 100 kPa = 1.0 BAR
+      percent = (pressureKpa / MAX_SENSOR_KPA) * 100.0;
+
+      if (percent > 3.0) {
+        statusStr = "ACTIVE";
       }
     }
-    prevBar = currentBar;
-    previousTimeMs = currentMs;
 
-    float timeRemainingMins = 0;
-    if (estimatedFlowRateLmin > 0.1) {
-      timeRemainingMins = remainingLiters / estimatedFlowRateLmin;
-    } else {
-      timeRemainingMins = remainingLiters / 5.0; // Baseline 5 L/min flow assumption
-    }
+    // 2. Refresh Screen
+    updateDisplayData(pressureBar, pressureKpa, percent, statusStr);
 
-    float timeToTarget20Mins = getTimeToTargetPercent(currentBar, 20.0, estimatedFlowRateLmin);
+    // 3. Serial Debug Print
+    Serial.printf("Raw: %ld | Delta: %ld | Pressure: %.3f BAR | %.1f kPa | Level: %.1f%%\n",
+                  raw, (raw - zeroOffset), pressureBar, pressureKpa, percent);
+  }
 
-    String statusStr = "NORMAL";
-    if (oxygenPercent <= 15.0) statusStr = "CRITICAL";
-    else if (oxygenPercent <= 30.0) statusStr = "LOW";
+  // 4. Send HTTP POST to Dashboard Server (every 1 second)
+  if (currentMs - lastHttpMs >= HTTP_INTERVAL_MS) {
+    lastHttpMs = currentMs;
 
-    // 3. Update ST7789 Display Screen
-    updateDisplayData(currentBar, oxygenPercent, remainingLiters, timeRemainingMins, statusStr);
-
-    // 4. Send HTTP POST to Node.js Dashboard Server
     if (WiFi.status() == WL_CONNECTED) {
       HTTPClient http;
       http.begin(SERVER_URL);
       http.addHeader("Content-Type", "application/json");
 
+      long raw = readHX710BRaw();
+      long diff = (raw != -1 && zeroOffset != 0) ? (raw - zeroOffset) : 0;
+      if (diff < 0) diff = 0;
+      float kpa = (float)diff / COUNTS_PER_KPA;
+      float bar = kpa / 100.0;
+      float pct = (kpa / MAX_SENSOR_KPA) * 100.0;
+      float simulatedTankBar = (pct / 100.0) * 200.0;
+      float remainingLiters = simulatedTankBar * 10.0;
+
       char body[256];
       snprintf(body, sizeof(body),
-        "{\"pressure_bar\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"flow_rate_lmin\":%.1f,\"time_remaining_mins\":%.0f,\"time_to_target_20_mins\":%.0f,\"status\":\"%s\"}",
-        currentBar, oxygenPercent, remainingLiters, estimatedFlowRateLmin, timeRemainingMins, timeToTarget20Mins, statusStr.c_str());
+        "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
+        bar, kpa, pct, remainingLiters, (pct > 3.0 ? "ACTIVE" : "IDLE"));
 
-      int httpCode = http.POST(body);
-      Serial.printf("POST Telemetry -> Code: %d\n", httpCode);
+      http.POST(body);
       http.end();
-    } else {
-      // Retry Wi-Fi connection periodically if disconnected
-      WiFi.begin(WIFI_SSID);
     }
   }
 }
