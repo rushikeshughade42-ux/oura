@@ -40,6 +40,26 @@ const char* SERVER_URL = "http://10.20.235.7:3000/data";
 unsigned long lastWifiRetryMs = 0;
 bool wifiWasConnected = false;
 
+void connectToHotspot() {
+  Serial.println("\n[WiFi] Scanning for hotspot...");
+  int n = WiFi.scanNetworks();
+  String targetSsid = "Rushikesh "; // Fallback with detected trailing space
+  
+  for (int i = 0; i < n; i++) {
+    String found = WiFi.SSID(i);
+    Serial.printf("  Found: '%s' (RSSI: %d)\n", found.c_str(), WiFi.RSSI(i));
+    if (found.startsWith("Rushikesh")) {
+      targetSsid = found;
+      Serial.printf("  -> Matched Hotspot SSID: '%s'\n", targetSsid.c_str());
+      break;
+    }
+  }
+
+  Serial.printf("[WiFi] Connecting to SSID: '%s'...\n", targetSsid.c_str());
+  WiFi.disconnect();
+  WiFi.begin(targetSsid.c_str(), WIFI_PASS);
+}
+
 // ==========================================
 // 3. Digital Air Pressure Sensor (MPS20N0040D + HX710B)
 // ==========================================
@@ -285,22 +305,23 @@ void setup() {
   // Auto-Tare the sensor at startup (zero baseline)
   tareSensor();
 
-  // Connect to Wi-Fi non-blocking attempt
+  // Connect to Wi-Fi with auto-detection of exact SSID
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  connectToHotspot();
   Serial.print("Connecting to Wi-Fi");
   int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 6) { // Quick 3-sec check
+  while (WiFi.status() != WL_CONNECTED && tries < 10) { // 5-second check
     delay(500);
     Serial.print(".");
     tries++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
+    wifiWasConnected = true;
     Serial.println("\nWiFi Connected! IP: " + WiFi.localIP().toString());
     updateWifiStatusUI(true);
   } else {
-    Serial.println("\nWiFi connection pending (running offline mode)...");
+    Serial.println("\nWiFi connection pending (will auto-reconnect in loop)...");
     updateWifiStatusUI(false);
   }
 }
@@ -353,9 +374,7 @@ void loop() {
 
     if (currentMs - lastWifiRetryMs >= 6000) {
       lastWifiRetryMs = currentMs;
-      Serial.println("[WiFi] Attempting background reconnect...");
-      WiFi.disconnect();
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      connectToHotspot();
     }
   } else {
     if (!wifiWasConnected) {
