@@ -1,5 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
@@ -31,8 +32,13 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 // ==========================================
 const char* WIFI_SSID  = "Rushikesh";
 const char* WIFI_PASS  = "";
-// Local Machine IP or your Vercel deployment URL (e.g. "https://your-app.vercel.app/data")
+
+// Use either your local laptop IP: "http://10.20.235.7:3000/data"
+// OR your live Vercel URL: "https://your-vercel-domain.vercel.app/data"
 const char* SERVER_URL = "http://10.20.235.7:3000/data";
+
+unsigned long lastWifiRetryMs = 0;
+bool wifiWasConnected = false;
 
 // ==========================================
 // 3. Digital Air Pressure Sensor (MPS20N0040D + HX710B)
@@ -337,15 +343,33 @@ void loop() {
                   raw, (raw - zeroOffset), pressureBar, pressureKpa, percent);
   }
 
-  // 4. Send HTTP POST to Dashboard Server (every 1 second)
+  // 4. Background Wi-Fi Auto-Reconnection & Status Tracking
+  if (WiFi.status() != WL_CONNECTED) {
+    if (wifiWasConnected) {
+      wifiWasConnected = false;
+      Serial.println("\n[WiFi] Connection lost. Switching to offline mode.");
+      updateWifiStatusUI(false);
+    }
+
+    if (currentMs - lastWifiRetryMs >= 6000) {
+      lastWifiRetryMs = currentMs;
+      Serial.println("[WiFi] Attempting background reconnect...");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+    }
+  } else {
+    if (!wifiWasConnected) {
+      wifiWasConnected = true;
+      Serial.println("\n[WiFi] Reconnected! IP: " + WiFi.localIP().toString());
+      updateWifiStatusUI(true);
+    }
+  }
+
+  // 5. Send HTTP/HTTPS Telemetry to Dashboard (every 1 second)
   if (currentMs - lastHttpMs >= HTTP_INTERVAL_MS) {
     lastHttpMs = currentMs;
 
     if (WiFi.status() == WL_CONNECTED) {
-      HTTPClient http;
-      http.begin(SERVER_URL);
-      http.addHeader("Content-Type", "application/json");
-
       long raw = readHX710BRaw();
       long diff = (raw != -1 && zeroOffset != 0) ? (raw - zeroOffset) : 0;
       if (diff < 0) diff = 0;
@@ -360,8 +384,30 @@ void loop() {
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
         bar, kpa, pct, remainingLiters, (pct > 3.0 ? "ACTIVE" : "IDLE"));
 
-      http.POST(body);
-      http.end();
+      String urlStr = String(SERVER_URL);
+      HTTPClient http;
+
+      if (urlStr.startsWith("https://")) {
+        WiFiClientSecure secureClient;
+        secureClient.setInsecure(); // Allow Vercel SSL certificates without root cert bundle
+        if (http.begin(secureClient, urlStr)) {
+          http.addHeader("Content-Type", "application/json");
+          int httpCode = http.POST(body);
+          if (httpCode > 0) {
+            Serial.printf("POST Vercel -> Code: %d\n", httpCode);
+          }
+          http.end();
+        }
+      } else {
+        if (http.begin(urlStr)) {
+          http.addHeader("Content-Type", "application/json");
+          int httpCode = http.POST(body);
+          if (httpCode > 0) {
+            Serial.printf("POST Local -> Code: %d\n", httpCode);
+          }
+          http.end();
+        }
+      }
     }
   }
 }

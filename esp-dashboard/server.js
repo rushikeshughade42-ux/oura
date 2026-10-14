@@ -5,17 +5,17 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 let clients = [];
 
-// Default telemetry state
+// Default telemetry state (Awaiting live ESP32 transmission)
 let latestData = {
-  pressure_bar: 200.0,
-  pressure_kpa: 40.0,
-  oxygen_percent: 100.0,
-  remaining_liters: 2000,
+  pressure_bar: 0.0,
+  pressure_kpa: 0.0,
+  oxygen_percent: 0.0,
+  remaining_liters: 0,
   flow_rate_lmin: 0.0,
-  time_remaining_mins: 400,
-  time_to_target_20_mins: 320,
-  status: 'NORMAL',
-  timestamp: new Date().toLocaleTimeString()
+  time_remaining_mins: 0,
+  time_to_target_20_mins: 0,
+  status: 'AWAITING ESP32',
+  timestamp: null
 };
 
 const server = http.createServer((req, res) => {
