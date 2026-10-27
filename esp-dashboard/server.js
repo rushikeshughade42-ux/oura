@@ -31,10 +31,12 @@ const server = http.createServer((req, res) => {
   }
 
   // REST API: GET current telemetry (Supported on Vercel Serverless & Local)
-  if (req.method === 'GET' && (req.url === '/data' || req.url === '/api/data')) {
+  if (req.method === 'GET' && (req.url.startsWith('/data') || req.url.startsWith('/api/data'))) {
     res.writeHead(200, { 
       'Content-Type': 'application/json',
-      'Cache-Control': 'no-cache, no-store, must-revalidate'
+      'Cache-Control': 'no-cache, no-store, must-revalidate, max-age=0',
+      'Pragma': 'no-cache',
+      'Expires': '0'
     });
     res.end(JSON.stringify(latestData));
     return;
@@ -57,7 +59,7 @@ const server = http.createServer((req, res) => {
   }
 
   // REST API: ESP32 posts live telemetry to /data
-  if (req.method === 'POST' && (req.url === '/data' || req.url === '/api/data')) {
+  if (req.method === 'POST' && (req.url.startsWith('/data') || req.url.startsWith('/api/data'))) {
     let body = '';
     req.on('data', chunk => { body += chunk.toString(); });
     req.on('end', () => {

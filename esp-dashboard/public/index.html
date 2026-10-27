@@ -594,15 +594,15 @@
       <div class="card col-5">
         <div>
           <div class="card-label">
-            <span>Tank Pressure Gauge</span>
-            <span style="font-size: 0.75rem; color: var(--accent-cyan);" id="pressureKpaDisplay">0.0 kPa (Sensor)</span>
+            <span>Display Sensor Pressure</span>
+            <span style="font-size: 0.8rem; color: var(--accent-cyan); font-weight: 700;" id="pressureKpaDisplay">0.0 kPa</span>
           </div>
-          <div class="stat-val" style="color: var(--accent-cyan);" id="pressureBar">0.0 <span class="unit">BAR</span></div>
+          <div class="stat-val" style="color: var(--accent-cyan);" id="pressureBar">0.000 <span class="unit">BAR</span></div>
         </div>
         <div>
-          <div class="stat-sub" id="pressureChangeLabel">Pressure Drop: <strong style="color: #38bdf8;">0.00 BAR/min</strong></div>
-          <div class="stat-sub" style="font-size: 0.75rem; margin-top: 0.2rem; color: #64748b;">
-            Physical: <span id="physicalSensorVal" style="color: #cbd5e1;">0.000 BAR</span> | Full: 200 BAR
+          <div class="stat-sub" id="pressureChangeLabel">Pressure Rate: <strong style="color: #38bdf8;">0.00 BAR/min</strong></div>
+          <div class="stat-sub" style="font-size: 0.75rem; margin-top: 0.2rem; color: #94a3b8;">
+            Simulated Cylinder Scale: <span id="simTankBar" style="color: #38bdf8; font-weight: 600;">0.0 BAR</span> (200 BAR Max)
           </div>
         </div>
       </div>
@@ -893,9 +893,12 @@
 
       // Simulated Medical Cylinder Gauge (0 to 200 BAR)
       const currentBar = (currentO2 / 100.0) * FULL_BAR;
-      pressureBar.innerHTML = `${currentBar.toFixed(1)} <span class="unit">BAR</span>`;
-      pressureKpaDisplay.textContent = `${rawKpa.toFixed(1)} kPa (Sensor)`;
-      physicalSensorVal.textContent = `${rawBar.toFixed(3)} BAR`;
+      
+      // Directly mirror physical TFT Display Boxes (Box 2: BAR, Box 3: kPa)
+      pressureBar.innerHTML = `${rawBar.toFixed(3)} <span class="unit">BAR</span>`;
+      pressureKpaDisplay.textContent = `${rawKpa.toFixed(1)} kPa`;
+      const simTankBar = document.getElementById('simTankBar');
+      if (simTankBar) simTankBar.textContent = `${currentBar.toFixed(1)} BAR`;
 
       // Update SVG Tank Graphic Fill Level (height 92 max, y = 19 + (92 - fillHeight))
       const fillHeight = (currentO2 / 100.0) * 92;
@@ -1139,36 +1142,44 @@
     }
 
     // ==========================================
-    // Telemetry Link: SSE with Auto-Polling Fallback
+    // Real-Time Telemetry Sync: 150ms High-Frequency Polling
     // ==========================================
     let pollInterval = null;
+    let isFetching = false;
 
-    function startPollingFallback() {
+    function startFastLiveSync() {
       if (pollInterval) return;
-      telemetryModeText.textContent = "Live Polling (Vercel Ready)";
+      telemetryModeText.textContent = "Live Stream (150ms Low-Latency)";
+
       pollInterval = setInterval(async () => {
-        if (isSimulating) return; // Don't overwrite if user is actively using simulator
+        if (isSimulating || isFetching) return;
+        isFetching = true;
         try {
-          const res = await fetch('/data');
+          const res = await fetch('/data?t=' + Date.now(), { 
+            cache: 'no-store',
+            headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
+          });
           if (res.ok) {
             const data = await res.json();
             updateDashboard(data);
-            connStatus.textContent = 'Hardware Telemetry (Live)';
+            connStatus.textContent = 'Hardware Sync (Live)';
             connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
             statusDot.style.backgroundColor = 'var(--o2-green)';
             statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
           }
         } catch (e) {
-          connStatus.textContent = 'Connecting...';
+          connStatus.textContent = 'Syncing...';
+        } finally {
+          isFetching = false;
         }
-      }, 1000);
+      }, 150);
     }
 
     try {
       const evtSource = new EventSource('/events');
 
       evtSource.onopen = function() {
-        connStatus.textContent = 'Stream Active (SSE)';
+        connStatus.textContent = 'Hardware Sync (SSE)';
         telemetryModeText.textContent = "Server-Sent Events (SSE)";
         connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
         statusDot.style.backgroundColor = 'var(--o2-green)';
@@ -1186,21 +1197,22 @@
       };
 
       evtSource.onerror = function() {
-        startPollingFallback();
+        startFastLiveSync();
       };
     } catch (err) {
-      startPollingFallback();
+      startFastLiveSync();
     }
 
-    // Immediate initial fetch on load
-    fetch('/data')
+    // Immediate initial fetch on load and start fast sync
+    fetch('/data?t=' + Date.now(), { cache: 'no-store' })
       .then(r => r.json())
       .then(d => {
         updateDashboard(d);
-        connStatus.textContent = 'Hardware Telemetry (Live)';
+        connStatus.textContent = 'Hardware Sync (Live)';
       })
-      .catch(() => {
-        startPollingFallback();
+      .catch(() => {})
+      .finally(() => {
+        startFastLiveSync();
       });
 
     // Initial canvas render

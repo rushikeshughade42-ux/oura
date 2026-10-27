@@ -302,6 +302,13 @@ void updateWifiStatusUI(bool connected) {
 // ==========================================
 void telemetryTask(void *pvParameters) {
   unsigned long lastSend = 0;
+  float lastSentPct = -999.0;
+  bool isFirstConnect = true;
+
+  WiFiClientSecure secureClient;
+  secureClient.setInsecure(); // Allow Vercel SSL
+  HTTPClient http;
+  http.setReuse(true); // HTTP Keep-Alive: skips redundant TLS handshakes for sub-100ms posts
 
   for (;;) {
     // 1. Manage Wi-Fi connection in the background
@@ -310,35 +317,55 @@ void telemetryTask(void *pvParameters) {
 
       WiFi.begin("Rushikesh ", WIFI_PASS);
       unsigned long tryStart = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 3000) {
-        vTaskDelay(200 / portTICK_PERIOD_MS);
+      while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 2500) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
       }
 
       if (WiFi.status() != WL_CONNECTED) {
         WiFi.begin("Rushikesh", WIFI_PASS);
         tryStart = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 3000) {
-          vTaskDelay(200 / portTICK_PERIOD_MS);
+        while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 2500) {
+          vTaskDelay(100 / portTICK_PERIOD_MS);
         }
       }
 
       wifiIsConnected = (WiFi.status() == WL_CONNECTED);
+      if (wifiIsConnected && isFirstConnect) {
+        isFirstConnect = false;
+        Serial.println("\n[WiFi] Connected successfully! Local IP: " + WiFi.localIP().toString());
+      }
     } else {
       wifiIsConnected = true;
     }
 
-    // 2. Send Telemetry every 2.5 seconds if connected
-    if (wifiIsConnected && (millis() - lastSend >= 2500)) {
-      lastSend = millis();
+    // 2. Read live sensor snapshot from Core 1
+    float tBar, tKpa, tPct;
+    char tStatus[16];
+    portENTER_CRITICAL(&stateMux);
+    tBar = livePressureBar;
+    tKpa = livePressureKpa;
+    tPct = livePercent;
+    strncpy(tStatus, liveStatusBuf, sizeof(tStatus));
+    portEXIT_CRITICAL(&stateMux);
 
-      float tBar, tKpa, tPct;
-      char tStatus[16];
-      portENTER_CRITICAL(&stateMux);
-      tBar = livePressureBar;
-      tKpa = livePressureKpa;
-      tPct = livePercent;
-      strncpy(tStatus, liveStatusBuf, sizeof(tStatus));
-      portEXIT_CRITICAL(&stateMux);
+    unsigned long now = millis();
+
+    // Adaptive Event Trigger: Send immediately when user presses, blows, or releases
+    bool valueChanged = (fabs(tPct - lastSentPct) >= 0.3) || (tPct == 0.0 && lastSentPct != 0.0) || (tPct > 0.0 && lastSentPct == 0.0);
+    bool shouldSend = false;
+
+    if (wifiIsConnected) {
+      if (valueChanged && (now - lastSend >= 250)) {
+        shouldSend = true; // High-frequency fast sync when value is changing
+      } else if (now - lastSend >= 1500) {
+        shouldSend = true; // Steady-state heartbeat
+      }
+    }
+
+    // 3. Post telemetry to cloud dashboard
+    if (shouldSend) {
+      lastSend = now;
+      lastSentPct = tPct;
 
       float simulatedTankBar = (tPct / 100.0) * 200.0;
       float remainingLiters = simulatedTankBar * 10.0;
@@ -348,21 +375,22 @@ void telemetryTask(void *pvParameters) {
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
         tBar, tKpa, tPct, remainingLiters, tStatus);
 
-      WiFiClientSecure secureClient;
-      secureClient.setInsecure(); // Allow Vercel SSL
-      HTTPClient http;
-      if (http.begin(secureClient, SERVER_URL)) {
+      if (!http.connected()) {
+        http.begin(secureClient, SERVER_URL);
         http.addHeader("Content-Type", "application/json");
-        http.setTimeout(2500);
-        int httpCode = http.POST(body);
-        if (httpCode > 0) {
-          Serial.printf("[Cloud] POST -> %d | %.1f kPa (%.1f%%)\n", httpCode, tKpa, tPct);
-        }
+        http.setTimeout(1800);
+      }
+
+      int httpCode = http.POST(body);
+      if (httpCode > 0) {
+        // Successful transmission
+      } else {
+        // Re-establish session on next attempt if server reset connection
         http.end();
       }
     }
 
-    vTaskDelay(500 / portTICK_PERIOD_MS);
+    vTaskDelay(25 / portTICK_PERIOD_MS);
   }
 }
 
