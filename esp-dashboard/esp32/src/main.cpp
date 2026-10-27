@@ -340,11 +340,10 @@ void telemetryTask(void *pvParameters) {
       wifiIsConnected = false;
       mqttIsConnected = false;
 
-      if (now - lastWifiAttempt >= 4000) {
+      if (lastWifiAttempt == 0 || (now - lastWifiAttempt >= 5000)) {
         lastWifiAttempt = now;
-        static bool toggleSsid = false;
-        toggleSsid = !toggleSsid;
-        const char* trySsid = toggleSsid ? "Rushikesh " : "Rushikesh";
+        static int retryCount = 0;
+        const char* trySsid = ((retryCount++ % 3) == 2) ? "Rushikesh " : "Rushikesh";
         Serial.printf("[WiFi] Attempting connection to '%s'...\n", trySsid);
         WiFi.begin(trySsid, WIFI_PASS);
       }
@@ -456,13 +455,6 @@ void setup() {
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
   updateCloudStatusUI(false, false);
-
-  Serial.println("[WiFi] Scanning available networks...");
-  int n = WiFi.scanNetworks();
-  Serial.printf("[WiFi] Found %d networks:\n", n);
-  for (int i = 0; i < n && i < 10; i++) {
-    Serial.printf("  [%d] '%s' (RSSI: %d dBm)\n", i, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
-  }
 
   // Spawn Background FreeRTOS Telemetry Task on Core 0
   xTaskCreatePinnedToCore(
