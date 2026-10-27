@@ -305,15 +305,13 @@ void telemetryTask(void *pvParameters) {
   float lastSentPct = -999.0;
   bool isFirstConnect = true;
 
-  WiFiClientSecure secureClient;
-  secureClient.setInsecure(); // Allow Vercel SSL
-  HTTPClient http;
-  http.setReuse(true); // HTTP Keep-Alive: skips redundant TLS handshakes for sub-100ms posts
-
   for (;;) {
     // 1. Manage Wi-Fi connection in the background
     if (WiFi.status() != WL_CONNECTED) {
       wifiIsConnected = false;
+
+      // Configure Google DNS (8.8.8.8) to prevent hotspot DNS lookup failures
+      WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
 
       WiFi.begin("Rushikesh ", WIFI_PASS);
       unsigned long tryStart = millis();
@@ -351,18 +349,18 @@ void telemetryTask(void *pvParameters) {
     unsigned long now = millis();
 
     // Adaptive Event Trigger: Send immediately when user presses, blows, or releases
-    bool valueChanged = (fabs(tPct - lastSentPct) >= 0.3) || (tPct == 0.0 && lastSentPct != 0.0) || (tPct > 0.0 && lastSentPct == 0.0);
+    bool valueChanged = (fabs(tPct - lastSentPct) >= 0.2) || (tPct == 0.0 && lastSentPct != 0.0) || (tPct > 0.0 && lastSentPct == 0.0);
     bool shouldSend = false;
 
     if (wifiIsConnected) {
-      if (valueChanged && (now - lastSend >= 250)) {
-        shouldSend = true; // High-frequency fast sync when value is changing
-      } else if (now - lastSend >= 1500) {
+      if (valueChanged && (now - lastSend >= 200)) {
+        shouldSend = true; // High-frequency fast sync on movement
+      } else if (now - lastSend >= 1200) {
         shouldSend = true; // Steady-state heartbeat
       }
     }
 
-    // 3. Post telemetry to cloud dashboard
+    // 3. Post telemetry cleanly to cloud dashboard
     if (shouldSend) {
       lastSend = now;
       lastSentPct = tPct;
@@ -375,22 +373,22 @@ void telemetryTask(void *pvParameters) {
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
         tBar, tKpa, tPct, remainingLiters, tStatus);
 
-      if (!http.connected()) {
-        http.begin(secureClient, SERVER_URL);
+      WiFiClientSecure secureClient;
+      secureClient.setInsecure(); // Allow Vercel SSL
+      HTTPClient http;
+      if (http.begin(secureClient, SERVER_URL)) {
         http.addHeader("Content-Type", "application/json");
         http.setTimeout(1800);
-      }
-
-      int httpCode = http.POST(body);
-      if (httpCode > 0) {
-        // Successful transmission
-      } else {
-        // Re-establish session on next attempt if server reset connection
+        int httpCode = http.POST(body);
+        if (httpCode > 0) {
+          http.getString(); // Consume response to keep buffer clean
+        }
         http.end();
       }
+      secureClient.stop();
     }
 
-    vTaskDelay(25 / portTICK_PERIOD_MS);
+    vTaskDelay(20 / portTICK_PERIOD_MS);
   }
 }
 

@@ -1175,45 +1175,16 @@
       }, 150);
     }
 
-    try {
-      const evtSource = new EventSource('/events');
+    // Immediate initial fetch on load and start direct fast sync
+    startFastLiveSync();
 
-      evtSource.onopen = function() {
-        connStatus.textContent = 'Hardware Sync (SSE)';
-        telemetryModeText.textContent = "Server-Sent Events (SSE)";
-        connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-        statusDot.style.backgroundColor = 'var(--o2-green)';
-        statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
-      };
-
-      evtSource.onmessage = function(event) {
-        if (isSimulating) return;
-        try {
-          const data = JSON.parse(event.data);
-          updateDashboard(data);
-        } catch (e) {
-          console.error("Error parsing telemetry JSON:", e);
-        }
-      };
-
-      evtSource.onerror = function() {
-        startFastLiveSync();
-      };
-    } catch (err) {
-      startFastLiveSync();
-    }
-
-    // Immediate initial fetch on load and start fast sync
     fetch('/data?t=' + Date.now(), { cache: 'no-store' })
       .then(r => r.json())
       .then(d => {
         updateDashboard(d);
         connStatus.textContent = 'Hardware Sync (Live)';
       })
-      .catch(() => {})
-      .finally(() => {
-        startFastLiveSync();
-      });
+      .catch(() => {});
 
     // Initial canvas render
     drawWaveformChart();
