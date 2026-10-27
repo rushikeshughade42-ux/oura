@@ -41,6 +41,7 @@ WiFiClient espMqttClient;
 PubSubClient mqttClient(espMqttClient);
 
 volatile bool wifiIsConnected = false;
+volatile bool mqttIsConnected = false;
 
 // ==========================================
 // 3. Digital Air Pressure Sensor (MPS20N0040D + HX710B)
@@ -131,13 +132,21 @@ void tareSensor() {
   }
 
   if (validSamples >= 3) {
-    zeroOffset = sum / validSamples;
+    long calculatedZero = sum / validSamples;
+    // Sanity check: Atmospheric room air is between 1.5M and 4.5M counts.
+    // If user turned on device while syringe was compressed with air, do not lock high pressure as zero!
+    if (calculatedZero >= 1500000 && calculatedZero <= 4500000) {
+      zeroOffset = calculatedZero;
+      Serial.printf("[Sensor] SUCCESS! Tare Zero Baseline: %ld (from %d samples)\n", zeroOffset, validSamples);
+    } else {
+      zeroOffset = 2730000; // Calibrated atmospheric baseline
+      Serial.printf("[Sensor] Notice: Sensor was pressurized at boot (%ld). Using calibrated baseline: %ld\n", calculatedZero, zeroOffset);
+    }
     sensorDetected = true;
-    Serial.printf("[Sensor] SUCCESS! Tare Zero Baseline: %ld (from %d samples)\n", zeroOffset, validSamples);
   } else {
-    zeroOffset = 3620000; // Expected ambient baseline
+    zeroOffset = 2730000; // Calibrated ambient baseline
     sensorDetected = true;
-    Serial.printf("[Sensor] Using ambient baseline: %ld\n", zeroOffset);
+    Serial.printf("[Sensor] Using default ambient baseline: %ld\n", zeroOffset);
   }
 }
 
@@ -288,16 +297,19 @@ void updateDisplayData(float currentBar, float currentKpa, float percent, const 
   tft.printf("Pins: G%d/G%d | %ldk", activeOutPin, activeSckPin, lastRawReading / 1000);
 }
 
-void updateWifiStatusUI(bool connected) {
-  tft.fillRect(230, 4, 85, 20, ILI9341_NAVY);
-  tft.setCursor(235, 9);
+void updateCloudStatusUI(bool wifiOk, bool mqttOk) {
+  tft.fillRect(205, 4, 110, 20, ILI9341_NAVY);
+  tft.setCursor(210, 9);
   tft.setTextSize(1);
-  if (connected) {
-    tft.setTextColor(ILI9341_GREEN);
-    tft.print("WiFi: ON");
-  } else {
+  if (!wifiOk) {
     tft.setTextColor(ILI9341_RED);
     tft.print("WiFi: OFF");
+  } else if (!mqttOk) {
+    tft.setTextColor(ILI9341_YELLOW);
+    tft.print("MQTT: CON...");
+  } else {
+    tft.setTextColor(ILI9341_GREEN);
+    tft.print("SYNC: LIVE");
   }
 }
 
@@ -307,11 +319,18 @@ void updateWifiStatusUI(bool connected) {
 void telemetryTask(void *pvParameters) {
   unsigned long lastSend = 0;
   float lastSentPct = -999.0;
-  bool isFirstConnect = true;
+  unsigned long lastWifiAttempt = 0;
+  unsigned long lastMqttAttempt = 0;
 
   mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
   mqttClient.setBufferSize(512);
-  mqttClient.setSocketTimeout(1);
+  mqttClient.setSocketTimeout(5); // 5 seconds robust timeout for cellular hotspot latency
+  mqttClient.setKeepAlive(30);
+
+  // Clean fixed client ID based on hardware MAC
+  String macStr = WiFi.macAddress();
+  macStr.replace(":", "");
+  String clientId = "OuraESP32_" + macStr;
 
   for (;;) {
     unsigned long now = millis();
@@ -319,47 +338,43 @@ void telemetryTask(void *pvParameters) {
     // 1. Manage Wi-Fi connection in the background
     if (WiFi.status() != WL_CONNECTED) {
       wifiIsConnected = false;
+      mqttIsConnected = false;
 
-      // Configure Google DNS (8.8.8.8) to prevent hotspot DNS lookup failures
-      WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, IPAddress(8, 8, 8, 8), IPAddress(1, 1, 1, 1));
-
-      WiFi.begin("Rushikesh ", WIFI_PASS);
-      unsigned long tryStart = millis();
-      while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 2500) {
-        vTaskDelay(100 / portTICK_PERIOD_MS);
-      }
-
-      if (WiFi.status() != WL_CONNECTED) {
-        WiFi.begin("Rushikesh", WIFI_PASS);
-        tryStart = millis();
-        while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 2500) {
-          vTaskDelay(100 / portTICK_PERIOD_MS);
-        }
-      }
-
-      wifiIsConnected = (WiFi.status() == WL_CONNECTED);
-      if (wifiIsConnected && isFirstConnect) {
-        isFirstConnect = false;
-        Serial.println("\n[WiFi] Connected successfully! Local IP: " + WiFi.localIP().toString());
+      if (now - lastWifiAttempt >= 4000) {
+        lastWifiAttempt = now;
+        static bool toggleSsid = false;
+        toggleSsid = !toggleSsid;
+        const char* trySsid = toggleSsid ? "Rushikesh " : "Rushikesh";
+        Serial.printf("[WiFi] Attempting connection to '%s'...\n", trySsid);
+        WiFi.begin(trySsid, WIFI_PASS);
       }
     } else {
-      wifiIsConnected = true;
+      if (!wifiIsConnected) {
+        wifiIsConnected = true;
+        Serial.println("\n[WiFi] Connected successfully! Local IP: " + WiFi.localIP().toString());
+      }
     }
 
     // 2. Manage High-Speed MQTT Connection (non-blocking retry)
-    static unsigned long lastMqttAttempt = 0;
     if (wifiIsConnected) {
       if (!mqttClient.connected()) {
-        if (now - lastMqttAttempt >= 2000) {
+        mqttIsConnected = false;
+        if (now - lastMqttAttempt >= 2500) {
           lastMqttAttempt = now;
-          String clientId = "OuraESP32_" + String(random(0xffff), HEX);
+          Serial.println("[MQTT] Connecting to broker.hivemq.com:1883 as " + clientId + "...");
           if (mqttClient.connect(clientId.c_str())) {
-            Serial.println("[MQTT] Connected to broker.hivemq.com:1883!");
+            mqttIsConnected = true;
+            Serial.println("[MQTT] Connected to broker.hivemq.com:1883 successfully!");
+          } else {
+            Serial.printf("[MQTT] Connection failed (rc=%d), will retry in 2.5s...\n", mqttClient.state());
           }
         }
       } else {
+        mqttIsConnected = true;
         mqttClient.loop();
       }
+    } else {
+      mqttIsConnected = false;
     }
 
     // 3. Read live sensor snapshot from Core 1
@@ -438,6 +453,16 @@ void setup() {
 
   // Start Wi-Fi in background
   WiFi.mode(WIFI_STA);
+  WiFi.setAutoReconnect(true);
+  WiFi.persistent(true);
+  updateCloudStatusUI(false, false);
+
+  Serial.println("[WiFi] Scanning available networks...");
+  int n = WiFi.scanNetworks();
+  Serial.printf("[WiFi] Found %d networks:\n", n);
+  for (int i = 0; i < n && i < 10; i++) {
+    Serial.printf("  [%d] '%s' (RSSI: %d dBm)\n", i, WiFi.SSID(i).c_str(), WiFi.RSSI(i));
+  }
 
   // Spawn Background FreeRTOS Telemetry Task on Core 0
   xTaskCreatePinnedToCore(
@@ -454,6 +479,7 @@ void setup() {
 void loop() {
   static unsigned long lastSensorRead = 0;
   static bool lastWifiState = false;
+  static bool lastMqttState = false;
   static float smoothedKpa = 0.0;
   static float displayedKpa = -1.0;
 
@@ -524,10 +550,11 @@ void loop() {
     }
   }
 
-  // Update Wi-Fi indicator if connection status changed
-  if (wifiIsConnected != lastWifiState) {
+  // Update Cloud Sync indicator on screen header (WiFi & MQTT state)
+  if (wifiIsConnected != lastWifiState || mqttIsConnected != lastMqttState) {
     lastWifiState = wifiIsConnected;
-    updateWifiStatusUI(lastWifiState);
+    lastMqttState = mqttIsConnected;
+    updateCloudStatusUI(lastWifiState, lastMqttState);
   }
 
   delay(4);

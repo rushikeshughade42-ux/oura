@@ -1212,7 +1212,14 @@
     const MQTT_BROKER_WSS = 'wss://broker.hivemq.com:8884/mqtt';
     const MQTT_TOPIC = 'oura_rushi_9921/oxygen/telemetry';
 
+    let activeMqttClient = null;
+    let lastPacketReceivedTimestamp = 0;
+
     function initMqttLiveSync() {
+      if (activeMqttClient) {
+        try { activeMqttClient.end(true); } catch(e) {}
+      }
+
       const clientId = 'oura_web_' + Math.random().toString(16).substring(2, 10);
       console.log('[MQTT] Connecting to HiveMQ WSS broker...', clientId);
 
@@ -1224,6 +1231,7 @@
           reconnectPeriod: 2000,
           keepalive: 60
         });
+        activeMqttClient = client;
 
         client.on('connect', () => {
           console.log('[MQTT] Connected to HiveMQ WSS successfully!');
@@ -1245,6 +1253,7 @@
         client.on('message', (topic, message) => {
           if (isSimulating) return;
           try {
+            lastPacketReceivedTimestamp = Date.now();
             const data = JSON.parse(message.toString());
             handleIncomingTelemetry(data);
           } catch (e) {
@@ -1265,6 +1274,34 @@
         console.error('[MQTT] Initialization error:', err);
       }
     }
+
+    // Tab Sleep & Resume Watcher: Instantly reconnects if device was asleep or tab in background
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        if (!activeMqttClient || !activeMqttClient.connected) {
+          console.log('[MQTT] Page visible after sleep. Re-syncing connection...');
+          initMqttLiveSync();
+        }
+      }
+    });
+
+    window.addEventListener('focus', () => {
+      if (!activeMqttClient || !activeMqttClient.connected) {
+        initMqttLiveSync();
+      }
+    });
+
+    // Hardware Telemetry Watchdog: If no packet arrives for > 5 seconds, indicate standby
+    setInterval(() => {
+      if (isSimulating) return;
+      const elapsed = Date.now() - lastPacketReceivedTimestamp;
+      if (lastPacketReceivedTimestamp > 0 && elapsed > 4500) {
+        connStatus.textContent = 'Standby (Waiting for ESP32)';
+        connBadge.style.borderColor = 'rgba(245, 158, 11, 0.4)';
+        statusDot.style.backgroundColor = 'var(--o2-yellow)';
+        statusDot.style.boxShadow = '0 0 8px var(--o2-yellow)';
+      }
+    }, 2000);
 
     // Fallback: Backup Poller to /data (in case browser network restricts WebSockets)
     let isPolling = false;
