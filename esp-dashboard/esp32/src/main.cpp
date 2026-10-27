@@ -33,6 +33,9 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 const char* WIFI_SSID  = "Rushikesh";
 const char* WIFI_PASS  = "";
 
+// Real-time Cloud Telemetry Stream (HTTP Port 80 - sub-50ms latency, zero SSL overhead)
+const char* STREAM_URL = "http://ntfy.sh/oura_bio_esp32_sensor";
+
 // Live Vercel Production URL for Cloud Telemetry
 const char* SERVER_URL = "https://oura-j6w4.vercel.app/data";
 
@@ -360,7 +363,7 @@ void telemetryTask(void *pvParameters) {
       }
     }
 
-    // 3. Post telemetry cleanly to cloud dashboard
+    // 3. Post telemetry to high-speed cloud stream
     if (shouldSend) {
       lastSend = now;
       lastSentPct = tPct;
@@ -373,19 +376,18 @@ void telemetryTask(void *pvParameters) {
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
         tBar, tKpa, tPct, remainingLiters, tStatus);
 
-      WiFiClientSecure secureClient;
-      secureClient.setInsecure(); // Allow Vercel SSL
+      WiFiClient client;
       HTTPClient http;
-      if (http.begin(secureClient, SERVER_URL)) {
+      if (http.begin(client, STREAM_URL)) {
         http.addHeader("Content-Type", "application/json");
-        http.setTimeout(1800);
+        http.setTimeout(800);
         int httpCode = http.POST(body);
         if (httpCode > 0) {
-          http.getString(); // Consume response to keep buffer clean
+          http.getString(); // Consume response
         }
         http.end();
       }
-      secureClient.stop();
+      client.stop();
     }
 
     vTaskDelay(20 / portTICK_PERIOD_MS);

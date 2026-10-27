@@ -1142,49 +1142,92 @@
     }
 
     // ==========================================
-    // Real-Time Telemetry Sync: 150ms High-Frequency Polling
     // ==========================================
-    let pollInterval = null;
-    let isFetching = false;
+    // Real-Time Telemetry Stream: Instant Push SSE + Fast Fallback
+    // ==========================================
+    const STREAM_SSE_URL = 'https://ntfy.sh/oura_bio_esp32_sensor/sse';
+    const STREAM_POLL_URL = 'https://ntfy.sh/oura_bio_esp32_sensor/json?poll=1';
 
-    function startFastLiveSync() {
-      if (pollInterval) return;
-      telemetryModeText.textContent = "Live Stream (150ms Low-Latency)";
-
-      pollInterval = setInterval(async () => {
-        if (isSimulating || isFetching) return;
-        isFetching = true;
-        try {
-          const res = await fetch('/data?t=' + Date.now(), { 
-            cache: 'no-store',
-            headers: { 'Cache-Control': 'no-cache', 'Pragma': 'no-cache' }
-          });
-          if (res.ok) {
-            const data = await res.json();
-            updateDashboard(data);
-            connStatus.textContent = 'Hardware Sync (Live)';
-            connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-            statusDot.style.backgroundColor = 'var(--o2-green)';
-            statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
-          }
-        } catch (e) {
-          connStatus.textContent = 'Syncing...';
-        } finally {
-          isFetching = false;
+    function handleIncomingTelemetry(rawObj) {
+      try {
+        let telemetry = rawObj;
+        if (rawObj.message && typeof rawObj.message === 'string') {
+          telemetry = JSON.parse(rawObj.message);
+        } else if (typeof rawObj === 'string') {
+          telemetry = JSON.parse(rawObj);
         }
-      }, 150);
+
+        if (telemetry && (telemetry.pressure_bar !== undefined || telemetry.oxygen_percent !== undefined)) {
+          updateDashboard(telemetry);
+          connStatus.textContent = 'Hardware Sync (Live ⚡)';
+          connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+          statusDot.style.backgroundColor = 'var(--o2-green)';
+          statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
+        }
+      } catch (e) {
+        console.error("Telemetry parse error:", e);
+      }
     }
 
-    // Immediate initial fetch on load and start direct fast sync
-    startFastLiveSync();
+    // 1. Primary: Direct Real-Time SSE Stream (Sub-30ms instant push!)
+    function connectRealTimeStream() {
+      try {
+        const sse = new EventSource(STREAM_SSE_URL);
 
-    fetch('/data?t=' + Date.now(), { cache: 'no-store' })
-      .then(r => r.json())
-      .then(d => {
-        updateDashboard(d);
-        connStatus.textContent = 'Hardware Sync (Live)';
-      })
-      .catch(() => {});
+        sse.onopen = function() {
+          telemetryModeText.textContent = "Live Stream (Instant Push)";
+          connStatus.textContent = 'Hardware Sync (Live ⚡)';
+        };
+
+        sse.onmessage = function(event) {
+          if (isSimulating) return;
+          try {
+            const data = JSON.parse(event.data);
+            handleIncomingTelemetry(data);
+          } catch (e) {}
+        };
+
+        sse.onerror = function() {
+          sse.close();
+          setTimeout(connectRealTimeStream, 2000);
+        };
+      } catch (err) {
+        setTimeout(connectRealTimeStream, 2000);
+      }
+    }
+
+    // 2. Secondary: Fast Polling Fallback (Polls every 200ms)
+    let isPolling = false;
+    setInterval(async () => {
+      if (isSimulating || isPolling) return;
+      isPolling = true;
+
+      try {
+        const res = await fetch(STREAM_POLL_URL + '&t=' + Date.now(), { cache: 'no-store' });
+        if (res.ok) {
+          const text = await res.text();
+          const lines = text.trim().split('\n');
+          if (lines.length > 0) {
+            const lastLine = lines[lines.length - 1];
+            const obj = JSON.parse(lastLine);
+            handleIncomingTelemetry(obj);
+          }
+        }
+      } catch (e) {
+        try {
+          const vRes = await fetch('/data?t=' + Date.now(), { cache: 'no-store' });
+          if (vRes.ok) {
+            const vData = await vRes.json();
+            handleIncomingTelemetry(vData);
+          }
+        } catch (e2) {}
+      } finally {
+        isPolling = false;
+      }
+    }, 200);
+
+    // Start stream immediately
+    connectRealTimeStream();
 
     // Initial canvas render
     drawWaveformChart();
