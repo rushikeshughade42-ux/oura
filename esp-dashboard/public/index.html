@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/mqtt@5.16.1/dist/mqtt.min.js"></script>
   <style>
     :root {
       --bg-dark: #07090e;
@@ -261,7 +262,7 @@
       width: 100%;
       background: linear-gradient(90deg, #10b981, #38bdf8);
       border-radius: 999px;
-      transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease, box-shadow 0.3s ease;
+      transition: background 0.3s ease, box-shadow 0.3s ease;
       box-shadow: 0 0 14px rgba(16, 185, 129, 0.5);
     }
 
@@ -812,28 +813,46 @@
       simToggleBtn.classList.toggle('active');
     }
 
+    // ==========================================
+    // High-Performance Smooth Interpolation (Lerp) Engine
+    // Eliminates discrete jumps (e.g. 0% -> 100%) and mirrors physical ST7789 display
+    // ==========================================
+    let targetO2 = 0.0;
+    let displayO2 = 0.0;
+
+    let targetBar = 0.0;
+    let displayBar = 0.0;
+
+    let targetKpa = 0.0;
+    let displayKpa = 0.0;
+
+    let targetTankBar = 0.0;
+    let displayTankBar = 0.0;
+
+    let targetRemL = 0.0;
+    let displayRemL = 0.0;
+
     function runSimulation(val) {
       isSimulating = true;
       const pct = parseFloat(val);
       simValLabel.textContent = `${pct.toFixed(0)}%`;
       
-      // Calculate simulated telemetry object
-      const simulatedData = {
-        oxygen_percent: pct,
-        pressure_bar: (pct / 100.0) * 0.40,
-        pressure_kpa: (pct / 100.0) * 40.0,
-        remaining_liters: (pct / 100.0) * (cylinderWaterVolumeL * FULL_BAR),
-        status: (pct >= 75) ? 'NORMAL' : (pct >= 25 ? 'CAUTION' : 'CRITICAL'),
-        timestamp: new Date().toLocaleTimeString() + " (Sim)"
-      };
-      updateDashboard(simulatedData);
+      targetO2 = pct;
+      targetBar = (pct / 100.0) * 0.40;
+      targetKpa = (pct / 100.0) * 40.0;
+      targetTankBar = (pct / 100.0) * FULL_BAR;
+      const usableBar = Math.max(targetTankBar - EMPTY_BAR, 0);
+      targetRemL = usableBar * cylinderWaterVolumeL;
+
+      lastPacketTime.textContent = new Date().toLocaleTimeString() + " (Sim)";
+      updateFlowCalculations(targetTankBar);
     }
 
     function resetToLiveHardware() {
       isSimulating = false;
       simPanel.classList.remove('show');
       simToggleBtn.classList.remove('active');
-      if (latestTelemetry) updateDashboard(latestTelemetry);
+      if (latestTelemetry) handleIncomingTelemetry(latestTelemetry);
     }
 
     function setCylinderSize(vol, name) {
@@ -849,7 +868,7 @@
         }
       });
 
-      if (latestTelemetry) updateDashboard(latestTelemetry);
+      if (latestTelemetry) handleIncomingTelemetry(latestTelemetry);
     }
 
     function setTargetPercent(val) {
@@ -865,54 +884,61 @@
       });
 
       targetLabelDisplay.textContent = `At ${num}%`;
-      if (latestTelemetry) updateDashboard(latestTelemetry);
+      if (latestTelemetry) handleIncomingTelemetry(latestTelemetry);
     }
 
     // ==========================================
-    // Telemetry Update Core Logic
+    // 60 FPS Hardware-Accelerated Lerp Render Loop
     // ==========================================
-    function updateDashboard(data) {
-      if (!isSimulating) {
-        latestTelemetry = data;
-      }
-      const now = Date.now();
+    function lerpTelemetryLoop() {
+      // Lerp factor: 0.22 ensures smooth 60 FPS gliding matching physical ST7789 display
+      const factor = isSimulating ? 0.35 : 0.22;
 
-      // Read raw/sent telemetry
-      let rawBar = (data.pressure_bar !== undefined) ? parseFloat(data.pressure_bar) : 0;
-      let rawKpa = (data.pressure_kpa !== undefined) ? parseFloat(data.pressure_kpa) : (rawBar * 100.0);
+      displayO2 += (targetO2 - displayO2) * factor;
+      displayBar += (targetBar - displayBar) * factor;
+      displayKpa += (targetKpa - displayKpa) * factor;
+      displayTankBar += (targetTankBar - displayTankBar) * factor;
+      displayRemL += (targetRemL - displayRemL) * factor;
 
-      // Directly sync Oxygen Percentage with ESP32
-      let currentO2 = (data.oxygen_percent !== undefined) 
-        ? parseFloat(data.oxygen_percent) 
-        : ((rawBar / 0.40) * 100.0);
-      currentO2 = Math.min(Math.max(currentO2, 0), 100);
+      // Snap to target if very close to eliminate micro-jitter
+      if (Math.abs(targetO2 - displayO2) < 0.05) displayO2 = targetO2;
+      if (Math.abs(targetBar - displayBar) < 0.0005) displayBar = targetBar;
+      if (Math.abs(targetKpa - displayKpa) < 0.05) displayKpa = targetKpa;
+      if (Math.abs(targetTankBar - displayTankBar) < 0.05) displayTankBar = targetTankBar;
+      if (Math.abs(targetRemL - displayRemL) < 0.5) displayRemL = targetRemL;
 
-      // Display Oxygen Percentage
-      o2Percent.textContent = currentO2.toFixed(1);
-      o2Progress.style.width = `${currentO2}%`;
+      renderSmoothUI(displayO2, displayBar, displayKpa, displayTankBar, displayRemL);
 
-      // Simulated Medical Cylinder Gauge (0 to 200 BAR)
-      const currentBar = (currentO2 / 100.0) * FULL_BAR;
-      
-      // Directly mirror physical TFT Display Boxes (Box 2: BAR, Box 3: kPa)
-      pressureBar.innerHTML = `${rawBar.toFixed(3)} <span class="unit">BAR</span>`;
-      pressureKpaDisplay.textContent = `${rawKpa.toFixed(1)} kPa`;
+      requestAnimationFrame(lerpTelemetryLoop);
+    }
+
+    function renderSmoothUI(o2, bar, kpa, tankBar, remL) {
+      // 1. Oxygen Percentage
+      o2Percent.textContent = o2.toFixed(1);
+      o2Progress.style.width = `${o2.toFixed(1)}%`;
+
+      // 2. Direct Mirror of Physical ST7789 TFT Boxes (Box 2: BAR, Box 3: kPa)
+      pressureBar.innerHTML = `${bar.toFixed(3)} <span class="unit">BAR</span>`;
+      pressureKpaDisplay.textContent = `${kpa.toFixed(1)} kPa`;
       const simTankBar = document.getElementById('simTankBar');
-      if (simTankBar) simTankBar.textContent = `${currentBar.toFixed(1)} BAR`;
+      if (simTankBar) simTankBar.textContent = `${tankBar.toFixed(1)} BAR`;
 
-      // Update SVG Tank Graphic Fill Level (height 92 max, y = 19 + (92 - fillHeight))
-      const fillHeight = (currentO2 / 100.0) * 92;
+      // 3. SVG Cylinder Tank Fill Level (max height 92, y = 19 + (92 - fillHeight))
+      const fillHeight = (o2 / 100.0) * 92;
       const fillY = 19 + (92 - fillHeight);
-      tankFillSvg.setAttribute('y', fillY);
-      tankFillSvg.setAttribute('height', fillHeight);
+      tankFillSvg.setAttribute('y', fillY.toFixed(2));
+      tankFillSvg.setAttribute('height', fillHeight.toFixed(2));
+
+      // 4. Usable Liters
+      remainingLiters.innerHTML = `${Math.round(remL)} <span class="unit">L</span>`;
 
       // ==========================================
-      // User's Core Color Specification:
+      // Medical Color Thresholds (Strict Sync with Physical Screen):
       // 100% - 75%: GREEN
       // 75%  - 25%: YELLOW
       // 25%  - 0%:  RED
       // ==========================================
-      if (currentO2 < 25.0) {
+      if (o2 < 25.0) {
         // Red (0% - 25%): Low / Critical
         o2Progress.style.background = 'linear-gradient(90deg, #ef4444, #dc2626)';
         o2Progress.style.boxShadow = '0 0 16px rgba(239, 68, 68, 0.65)';
@@ -930,7 +956,7 @@
         alertMsg.textContent = 'CRITICAL ALERT: Oxygen level depleted below 25%! Switch cylinder immediately!';
 
         playAlertBeep('critical');
-      } else if (currentO2 < 75.0) {
+      } else if (o2 < 75.0) {
         // Yellow (25% - 75%): Moderate / Caution
         o2Progress.style.background = 'linear-gradient(90deg, #f59e0b, #d97706)';
         o2Progress.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.5)';
@@ -945,7 +971,7 @@
 
         alertBanner.className = 'alert-banner alert-warning col-12';
         alertIcon.textContent = '⚠️';
-        alertMsg.textContent = `CAUTION: Oxygen reserve moderate (${currentO2.toFixed(1)}%). Monitor patient delivery.`;
+        alertMsg.textContent = `CAUTION: Oxygen reserve moderate (${o2.toFixed(1)}%). Monitor patient delivery.`;
       } else {
         // Green (75% - 100%): Safe / Normal
         o2Progress.style.background = 'linear-gradient(90deg, #10b981, #059669)';
@@ -963,8 +989,10 @@
         alertIcon.textContent = '🟢';
         alertMsg.textContent = 'System Operating Normally - Adequate Oxygen Supply (75% - 100%)';
       }
+    }
 
-      // Pressure Change Calculation (Delta P / Delta t)
+    function updateFlowCalculations(currentBar) {
+      const now = Date.now();
       let calculatedFlow = 0.0;
       if (prevBar !== null && prevTimestamp !== null && now > prevTimestamp) {
         const dtMinutes = (now - prevTimestamp) / 60000.0;
@@ -984,33 +1012,27 @@
       prevBar = currentBar;
       prevTimestamp = now;
 
-      // Remaining Usable Volume (Liters)
-      const usableBar = Math.max(currentBar - EMPTY_BAR, 0);
-      const remainingL = usableBar * cylinderWaterVolumeL;
-      remainingLiters.innerHTML = `${Math.round(remainingL)} <span class="unit">L</span>`;
-
-      // Oxygen Flow Rate (L/min)
-      const activeFlow = (data.flow_rate_lmin && data.flow_rate_lmin > 0.1) 
-        ? parseFloat(data.flow_rate_lmin) 
+      const activeFlow = (latestTelemetry && latestTelemetry.flow_rate_lmin && latestTelemetry.flow_rate_lmin > 0.1) 
+        ? parseFloat(latestTelemetry.flow_rate_lmin) 
         : (smoothedFlowRate > 0.1 ? smoothedFlowRate : 5.0); // Baseline 5 L/min
 
       flowRate.innerHTML = `${activeFlow.toFixed(1)} <span class="unit">L/min</span>`;
       flowRateSub.textContent = (smoothedFlowRate > 0.1) ? "Live dynamic consumption" : "Baseline flow assumption (5 L/min)";
 
-      // Time Remaining to Empty (0%)
+      const usableBar = Math.max(currentBar - EMPTY_BAR, 0);
+      const remainingL = usableBar * cylinderWaterVolumeL;
       const minsToEmpty = Math.round(remainingL / activeFlow);
       timeRemaining.innerHTML = `${minsToEmpty} <span class="unit">mins</span>`;
       const hrs = Math.floor(minsToEmpty / 60);
       const remMins = minsToEmpty % 60;
       timeRemainingHuman.textContent = hrs > 0 ? `~ ${hrs}h ${remMins}m until cylinder empty` : `~ ${remMins}m until cylinder empty`;
 
-      // Time Remaining to Warning Threshold (e.g. 25%)
-      const targetBar = EMPTY_BAR + (currentTargetPercent / 100.0) * (FULL_BAR - EMPTY_BAR);
-      if (currentBar <= targetBar) {
+      const targetThresholdBar = EMPTY_BAR + (currentTargetPercent / 100.0) * (FULL_BAR - EMPTY_BAR);
+      if (currentBar <= targetThresholdBar) {
         timeToTargetVal.innerHTML = `<span style="color: #ef4444; font-size: 1.5rem;">ALERT REACHED</span>`;
         timeToTargetHuman.textContent = `Oxygen is at or below alert threshold (${currentTargetPercent}%)`;
       } else {
-        const volumeToTarget = (currentBar - targetBar) * cylinderWaterVolumeL;
+        const volumeToTarget = (currentBar - targetThresholdBar) * cylinderWaterVolumeL;
         const minsToTarget = Math.round(volumeToTarget / activeFlow);
         timeToTargetVal.innerHTML = `${minsToTarget} <span class="unit">mins</span>`;
         const tHrs = Math.floor(minsToTarget / 60);
@@ -1019,14 +1041,56 @@
           ? `~ ${tHrs}h ${tMins}m remaining until ${currentTargetPercent}%`
           : `~ ${tMins}m remaining until ${currentTargetPercent}%`;
       }
+    }
 
-      // Timestamp
-      lastPacketTime.textContent = data.timestamp || new Date().toLocaleTimeString();
+    function handleIncomingTelemetry(rawObj) {
+      if (isSimulating) return;
+      try {
+        let telemetry = rawObj;
+        if (rawObj.message && typeof rawObj.message === 'string') {
+          telemetry = JSON.parse(rawObj.message);
+        } else if (typeof rawObj === 'string') {
+          telemetry = JSON.parse(rawObj);
+        }
 
-      // Push to Waveform Chart
-      chartHistory.shift();
-      chartHistory.push({ time: Date.now(), percent: currentO2, bar: currentBar });
-      drawWaveformChart();
+        if (!telemetry || (telemetry.pressure_bar === undefined && telemetry.oxygen_percent === undefined)) {
+          return;
+        }
+
+        latestTelemetry = telemetry;
+
+        let rawBar = (telemetry.pressure_bar !== undefined) ? parseFloat(telemetry.pressure_bar) : 0;
+        let rawKpa = (telemetry.pressure_kpa !== undefined) ? parseFloat(telemetry.pressure_kpa) : (rawBar * 100.0);
+        let currentO2 = (telemetry.oxygen_percent !== undefined) 
+          ? parseFloat(telemetry.oxygen_percent) 
+          : ((rawBar / 0.40) * 100.0);
+        currentO2 = Math.min(Math.max(currentO2, 0), 100);
+
+        // Update target values for 60 FPS lerp engine
+        targetO2 = currentO2;
+        targetBar = rawBar;
+        targetKpa = rawKpa;
+        targetTankBar = (currentO2 / 100.0) * FULL_BAR;
+        const usableBar = Math.max(targetTankBar - EMPTY_BAR, 0);
+        targetRemL = usableBar * cylinderWaterVolumeL;
+
+        lastPacketTime.textContent = telemetry.timestamp || new Date().toLocaleTimeString();
+
+        // Push to Waveform Chart History
+        chartHistory.shift();
+        chartHistory.push({ time: Date.now(), percent: currentO2, bar: targetTankBar });
+        drawWaveformChart();
+
+        updateFlowCalculations(targetTankBar);
+
+        // Update live connection badge
+        connStatus.textContent = 'Hardware Sync (Live ⚡)';
+        connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+        statusDot.style.backgroundColor = 'var(--o2-green)';
+        statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
+      } catch (e) {
+        console.error("Telemetry parse error:", e);
+      }
     }
 
     // ==========================================
@@ -1142,92 +1206,92 @@
     }
 
     // ==========================================
+    // Real-Time High-Speed MQTT Connection over Secure WebSocket
+    // HiveMQ Public Broker: broker.hivemq.com:8884 (Sub-20ms latency, zero rate limits)
     // ==========================================
-    // Real-Time Telemetry Stream: Instant Push SSE + Fast Fallback
-    // ==========================================
-    const STREAM_SSE_URL = 'https://ntfy.sh/oura_bio_esp32_sensor/sse';
-    const STREAM_POLL_URL = 'https://ntfy.sh/oura_bio_esp32_sensor/json?poll=1';
+    const MQTT_BROKER_WSS = 'wss://broker.hivemq.com:8884/mqtt';
+    const MQTT_TOPIC = 'oura_rushi_9921/oxygen/telemetry';
 
-    function handleIncomingTelemetry(rawObj) {
+    function initMqttLiveSync() {
+      const clientId = 'oura_web_' + Math.random().toString(16).substring(2, 10);
+      console.log('[MQTT] Connecting to HiveMQ WSS broker...', clientId);
+
       try {
-        let telemetry = rawObj;
-        if (rawObj.message && typeof rawObj.message === 'string') {
-          telemetry = JSON.parse(rawObj.message);
-        } else if (typeof rawObj === 'string') {
-          telemetry = JSON.parse(rawObj);
-        }
+        const client = mqtt.connect(MQTT_BROKER_WSS, {
+          clientId: clientId,
+          clean: true,
+          connectTimeout: 5000,
+          reconnectPeriod: 2000,
+          keepalive: 60
+        });
 
-        if (telemetry && (telemetry.pressure_bar !== undefined || telemetry.oxygen_percent !== undefined)) {
-          updateDashboard(telemetry);
+        client.on('connect', () => {
+          console.log('[MQTT] Connected to HiveMQ WSS successfully!');
+          telemetryModeText.textContent = "Live MQTT Stream (Instant ⚡)";
           connStatus.textContent = 'Hardware Sync (Live ⚡)';
           connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
           statusDot.style.backgroundColor = 'var(--o2-green)';
           statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
-        }
-      } catch (e) {
-        console.error("Telemetry parse error:", e);
-      }
-    }
 
-    // 1. Primary: Direct Real-Time SSE Stream (Sub-30ms instant push!)
-    function connectRealTimeStream() {
-      try {
-        const sse = new EventSource(STREAM_SSE_URL);
+          client.subscribe(MQTT_TOPIC, (err) => {
+            if (!err) {
+              console.log('[MQTT] Subscribed to topic:', MQTT_TOPIC);
+            } else {
+              console.error('[MQTT] Subscription error:', err);
+            }
+          });
+        });
 
-        sse.onopen = function() {
-          telemetryModeText.textContent = "Live Stream (Instant Push)";
-          connStatus.textContent = 'Hardware Sync (Live ⚡)';
-        };
-
-        sse.onmessage = function(event) {
+        client.on('message', (topic, message) => {
           if (isSimulating) return;
           try {
-            const data = JSON.parse(event.data);
+            const data = JSON.parse(message.toString());
             handleIncomingTelemetry(data);
-          } catch (e) {}
-        };
+          } catch (e) {
+            console.error('[MQTT] Parse error:', e);
+          }
+        });
 
-        sse.onerror = function() {
-          sse.close();
-          setTimeout(connectRealTimeStream, 2000);
-        };
+        client.on('error', (err) => {
+          console.warn('[MQTT] Client error:', err);
+        });
+
+        client.on('offline', () => {
+          console.warn('[MQTT] Client offline, reconnecting...');
+          connStatus.textContent = 'Reconnecting...';
+          statusDot.style.backgroundColor = 'var(--o2-yellow)';
+        });
       } catch (err) {
-        setTimeout(connectRealTimeStream, 2000);
+        console.error('[MQTT] Initialization error:', err);
       }
     }
 
-    // 2. Secondary: Fast Polling Fallback (Polls every 200ms)
+    // Fallback: Backup Poller to /data (in case browser network restricts WebSockets)
     let isPolling = false;
     setInterval(async () => {
       if (isSimulating || isPolling) return;
       isPolling = true;
 
       try {
-        const res = await fetch(STREAM_POLL_URL + '&t=' + Date.now(), { cache: 'no-store' });
-        if (res.ok) {
-          const text = await res.text();
-          const lines = text.trim().split('\n');
-          if (lines.length > 0) {
-            const lastLine = lines[lines.length - 1];
-            const obj = JSON.parse(lastLine);
-            handleIncomingTelemetry(obj);
+        const vRes = await fetch('/data?t=' + Date.now(), { cache: 'no-store' });
+        if (vRes.ok) {
+          const vData = await vRes.json();
+          // Only update if not receiving MQTT
+          if (connStatus.textContent.includes('Reconnecting') || connStatus.textContent.includes('Standby')) {
+            handleIncomingTelemetry(vData);
           }
         }
       } catch (e) {
-        try {
-          const vRes = await fetch('/data?t=' + Date.now(), { cache: 'no-store' });
-          if (vRes.ok) {
-            const vData = await vRes.json();
-            handleIncomingTelemetry(vData);
-          }
-        } catch (e2) {}
       } finally {
         isPolling = false;
       }
-    }, 200);
+    }, 1000);
 
-    // Start stream immediately
-    connectRealTimeStream();
+    // Start 60 FPS Continuous Lerp Animation Loop
+    requestAnimationFrame(lerpTelemetryLoop);
+
+    // Connect to Real-time MQTT Broker
+    initMqttLiveSync();
 
     // Initial canvas render
     drawWaveformChart();

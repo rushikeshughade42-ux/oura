@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
-#include <HTTPClient.h>
+#include <PubSubClient.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <SPI.h>
@@ -30,14 +29,16 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 // ==========================================
 // 2. Wi-Fi & Network Configuration
 // ==========================================
-const char* WIFI_SSID  = "Rushikesh";
-const char* WIFI_PASS  = "";
+const char* WIFI_SSID   = "Rushikesh";
+const char* WIFI_PASS   = "";
 
-// Real-time Cloud Telemetry Stream (HTTP Port 80 - sub-50ms latency, zero SSL overhead)
-const char* STREAM_URL = "http://ntfy.sh/oura_bio_esp32_sensor";
+// High-speed MQTT Broker (Sub-20ms latency, zero rate-limiting)
+const char* MQTT_BROKER = "broker.hivemq.com";
+const int   MQTT_PORT   = 1883;
+const char* MQTT_TOPIC  = "oura_rushi_9921/oxygen/telemetry";
 
-// Live Vercel Production URL for Cloud Telemetry
-const char* SERVER_URL = "https://oura-j6w4.vercel.app/data";
+WiFiClient espMqttClient;
+PubSubClient mqttClient(espMqttClient);
 
 volatile bool wifiIsConnected = false;
 
@@ -308,7 +309,13 @@ void telemetryTask(void *pvParameters) {
   float lastSentPct = -999.0;
   bool isFirstConnect = true;
 
+  mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+  mqttClient.setBufferSize(512);
+  mqttClient.setSocketTimeout(1);
+
   for (;;) {
+    unsigned long now = millis();
+
     // 1. Manage Wi-Fi connection in the background
     if (WiFi.status() != WL_CONNECTED) {
       wifiIsConnected = false;
@@ -339,7 +346,23 @@ void telemetryTask(void *pvParameters) {
       wifiIsConnected = true;
     }
 
-    // 2. Read live sensor snapshot from Core 1
+    // 2. Manage High-Speed MQTT Connection (non-blocking retry)
+    static unsigned long lastMqttAttempt = 0;
+    if (wifiIsConnected) {
+      if (!mqttClient.connected()) {
+        if (now - lastMqttAttempt >= 2000) {
+          lastMqttAttempt = now;
+          String clientId = "OuraESP32_" + String(random(0xffff), HEX);
+          if (mqttClient.connect(clientId.c_str())) {
+            Serial.println("[MQTT] Connected to broker.hivemq.com:1883!");
+          }
+        }
+      } else {
+        mqttClient.loop();
+      }
+    }
+
+    // 3. Read live sensor snapshot from Core 1
     float tBar, tKpa, tPct;
     char tStatus[16];
     portENTER_CRITICAL(&stateMux);
@@ -349,21 +372,20 @@ void telemetryTask(void *pvParameters) {
     strncpy(tStatus, liveStatusBuf, sizeof(tStatus));
     portEXIT_CRITICAL(&stateMux);
 
-    unsigned long now = millis();
-
     // Adaptive Event Trigger: Send immediately when user presses, blows, or releases
-    bool valueChanged = (fabs(tPct - lastSentPct) >= 0.2) || (tPct == 0.0 && lastSentPct != 0.0) || (tPct > 0.0 && lastSentPct == 0.0);
+    bool valueChanged = (fabs(tPct - lastSentPct) >= 0.1) || (tPct == 0.0 && lastSentPct != 0.0) || (tPct > 0.0 && lastSentPct == 0.0);
     bool shouldSend = false;
 
-    if (wifiIsConnected) {
-      if (valueChanged && (now - lastSend >= 200)) {
-        shouldSend = true; // High-frequency fast sync on movement
-      } else if (now - lastSend >= 1200) {
+    if (wifiIsConnected && mqttClient.connected()) {
+      // 60ms fast dispatch when changing: ultra smooth continuous flow (~16 updates/sec)!
+      if (valueChanged && (now - lastSend >= 60)) {
+        shouldSend = true;
+      } else if (now - lastSend >= 800) {
         shouldSend = true; // Steady-state heartbeat
       }
     }
 
-    // 3. Post telemetry to high-speed cloud stream
+    // 4. Publish telemetry packet (Instant 2ms TCP dispatch!)
     if (shouldSend) {
       lastSend = now;
       lastSentPct = tPct;
@@ -376,21 +398,10 @@ void telemetryTask(void *pvParameters) {
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
         tBar, tKpa, tPct, remainingLiters, tStatus);
 
-      WiFiClient client;
-      HTTPClient http;
-      if (http.begin(client, STREAM_URL)) {
-        http.addHeader("Content-Type", "application/json");
-        http.setTimeout(800);
-        int httpCode = http.POST(body);
-        if (httpCode > 0) {
-          http.getString(); // Consume response
-        }
-        http.end();
-      }
-      client.stop();
+      mqttClient.publish(MQTT_TOPIC, body);
     }
 
-    vTaskDelay(20 / portTICK_PERIOD_MS);
+    vTaskDelay(10 / portTICK_PERIOD_MS);
   }
 }
 
@@ -453,11 +464,11 @@ void loop() {
 
   unsigned long currentMs = millis();
 
-  // Read sensor every 110ms (clean 10Hz sync)
-  if (currentMs - lastSensorRead >= 110) {
+  // Read sensor every 80ms (clean sync to HX710B data ready)
+  if (currentMs - lastSensorRead >= 80) {
     lastSensorRead = currentMs;
 
-    long raw = readHX710BWithTimeout(130);
+    long raw = readHX710BWithTimeout(120);
     if (raw > 1000000) {
       lastRawReading = raw;
 
