@@ -82,7 +82,7 @@ const server = http.createServer((req, res) => {
           remaining_liters: Math.max(liters, 0),
           flow_rate_lmin: flow,
           time_remaining_mins: Math.max(timeRemaining, 0),
-          status: parsed.status || (percent <= 15 ? 'CRITICAL' : percent <= 30 ? 'LOW' : 'NORMAL'),
+          status: parsed.status || (percent < 25.0 ? 'CRITICAL' : percent < 75.0 ? 'CAUTION' : 'NORMAL'),
           timestamp: new Date().toLocaleTimeString()
         };
 

@@ -3,26 +3,39 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>ESP32 High-Pressure Oxygen Cylinder Monitor & Telemetry</title>
-  <meta name="description" content="Real-time web telemetry dashboard for ESP32 Oxygen Cylinder Monitor with dynamic pressure tracking, remaining volume, and time-to-empty calculations.">
+  <title>ESP32 Medical Oxygen Cylinder Telemetry & Monitor</title>
+  <meta name="description" content="Hospital-grade real-time web telemetry dashboard for ESP32 Oxygen Cylinder Monitor with dynamic pressure tracking, remaining volume, time-to-empty predictions, and live waveform telemetry.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
       --bg-dark: #07090e;
-      --bg-card: rgba(15, 23, 42, 0.75);
+      --bg-card: rgba(15, 23, 42, 0.78);
       --card-border: rgba(255, 255, 255, 0.08);
       --accent-cyan: #06b6d4;
       --accent-blue: #3b82f6;
       --text-main: #f8fafc;
       --text-muted: #94a3b8;
-      --status-normal: #10b981;
-      --status-normal-glow: rgba(16, 185, 129, 0.3);
-      --status-warning: #f59e0b;
-      --status-warning-glow: rgba(245, 158, 11, 0.3);
-      --status-critical: #ef4444;
-      --status-critical-glow: rgba(239, 68, 68, 0.4);
+      
+      /* Medical Tri-Color Oxygen System */
+      /* 100% - 75%: Safe / Full (Green) */
+      --o2-green: #10b981;
+      --o2-green-glow: rgba(16, 185, 129, 0.35);
+      --o2-green-bg: rgba(16, 185, 129, 0.12);
+
+      /* 75% - 25%: Caution / Moderate (Yellow) */
+      --o2-yellow: #f59e0b;
+      --o2-yellow-glow: rgba(245, 158, 11, 0.35);
+      --o2-yellow-bg: rgba(245, 158, 11, 0.12);
+
+      /* 25% - 0%: Critical / Low (Red) */
+      --o2-red: #ef4444;
+      --o2-red-glow: rgba(239, 68, 68, 0.45);
+      --o2-red-bg: rgba(239, 68, 68, 0.15);
+
+      --current-o2-color: var(--o2-green);
+      --current-o2-glow: var(--o2-green-glow);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -35,20 +48,22 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      padding: 1.5rem;
+      padding: 1.25rem;
+      overflow-x: hidden;
     }
 
     .container {
       width: 100%;
-      max-width: 1180px;
+      max-width: 1200px;
     }
 
+    /* Header */
     header {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 1.75rem;
-      padding-bottom: 1rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 1.2rem;
       border-bottom: 1px solid var(--card-border);
       flex-wrap: wrap;
       gap: 1rem;
@@ -57,31 +72,31 @@
     .brand {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
+      gap: 0.85rem;
     }
 
     .brand-icon {
-      width: 44px;
-      height: 44px;
-      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-blue));
-      border-radius: 12px;
+      width: 48px;
+      height: 48px;
+      background: linear-gradient(135deg, #06b6d4, #3b82f6);
+      border-radius: 14px;
       display: flex;
       align-items: center;
       justify-content: center;
-      box-shadow: 0 0 20px rgba(6, 182, 212, 0.4);
+      box-shadow: 0 0 24px rgba(6, 182, 212, 0.4);
     }
 
     .brand-icon svg {
-      width: 26px;
-      height: 26px;
-      fill: #fff;
+      width: 28px;
+      height: 28px;
+      fill: #ffffff;
     }
 
     .title-group h1 {
-      font-size: 1.65rem;
+      font-size: 1.7rem;
       font-weight: 700;
       letter-spacing: -0.02em;
-      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      background: linear-gradient(135deg, #38bdf8 0%, #a78bfa 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
     }
@@ -89,12 +104,16 @@
     .title-group p {
       color: var(--text-muted);
       font-size: 0.85rem;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      margin-top: 0.15rem;
     }
 
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 0.85rem;
+      gap: 0.75rem;
       flex-wrap: wrap;
     }
 
@@ -103,8 +122,8 @@
       align-items: center;
       gap: 0.6rem;
       background: rgba(16, 185, 129, 0.12);
-      border: 1px solid var(--status-normal-glow);
-      color: var(--status-normal);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      color: var(--o2-green);
       padding: 0.45rem 1rem;
       border-radius: 9999px;
       font-size: 0.85rem;
@@ -115,18 +134,39 @@
     .status-dot {
       width: 10px;
       height: 10px;
-      background-color: var(--status-normal);
+      background-color: var(--o2-green);
       border-radius: 50%;
-      box-shadow: 0 0 10px var(--status-normal);
+      box-shadow: 0 0 10px var(--o2-green);
       animation: pulse 2s infinite;
     }
 
     @keyframes pulse {
       0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.3; transform: scale(0.85); }
+      50% { opacity: 0.35; transform: scale(0.85); }
     }
 
-    /* Grid System */
+    .btn-action {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      color: var(--text-muted);
+      padding: 0.45rem 0.85rem;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn-action:hover, .btn-action.active {
+      background: rgba(6, 182, 212, 0.15);
+      border-color: var(--accent-cyan);
+      color: var(--accent-cyan);
+    }
+
+    /* Grid Layout */
     .grid {
       display: grid;
       grid-template-columns: repeat(12, 1fr);
@@ -153,23 +193,24 @@
     .card:hover {
       transform: translateY(-2px);
       border-color: rgba(56, 189, 248, 0.3);
-      box-shadow: 0 15px 35px -10px rgba(0, 0, 0, 0.6);
+      box-shadow: 0 16px 36px -10px rgba(0, 0, 0, 0.65);
     }
 
     .col-12 { grid-column: span 12; }
     .col-8  { grid-column: span 8; }
     .col-7  { grid-column: span 7; }
+    .col-6  { grid-column: span 6; }
     .col-5  { grid-column: span 5; }
     .col-4  { grid-column: span 4; }
 
-    @media (max-width: 960px) {
-      .col-8, .col-7, .col-5, .col-4 {
+    @media (max-width: 980px) {
+      .col-8, .col-7, .col-6, .col-5, .col-4 {
         grid-column: span 12;
       }
     }
 
     .card-label {
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       font-weight: 600;
       color: var(--text-muted);
       text-transform: uppercase;
@@ -184,13 +225,13 @@
     .hero-val-group {
       display: flex;
       align-items: baseline;
-      gap: 0.5rem;
+      gap: 0.4rem;
       margin-top: 0.25rem;
     }
 
     .hero-value {
-      font-size: 3.5rem;
-      font-weight: 700;
+      font-size: 3.8rem;
+      font-weight: 800;
       line-height: 1;
       font-family: 'JetBrains Mono', monospace;
       color: var(--text-main);
@@ -198,20 +239,21 @@
     }
 
     .unit {
-      font-size: 1.2rem;
+      font-size: 1.15rem;
       color: var(--text-muted);
       font-weight: 400;
     }
 
-    /* Oxygen Level Progress Bar */
+    /* Oxygen Progress Bar */
     .progress-bar-container {
       width: 100%;
-      height: 14px;
+      height: 16px;
       background: rgba(255, 255, 255, 0.06);
       border-radius: 999px;
-      margin-top: 1.25rem;
+      margin-top: 1.15rem;
       overflow: hidden;
       position: relative;
+      border: 1px solid rgba(255, 255, 255, 0.05);
     }
 
     .progress-bar-fill {
@@ -219,12 +261,26 @@
       width: 100%;
       background: linear-gradient(90deg, #10b981, #38bdf8);
       border-radius: 999px;
-      transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease;
-      box-shadow: 0 0 12px rgba(16, 185, 129, 0.5);
+      transition: width 0.35s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease, box-shadow 0.3s ease;
+      box-shadow: 0 0 14px rgba(16, 185, 129, 0.5);
     }
 
+    /* Range Indicators below progress bar */
+    .range-markers {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 0.4rem;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+    }
+
+    .range-tag-red { color: #f87171; font-weight: 600; }
+    .range-tag-yellow { color: #fbbf24; font-weight: 600; }
+    .range-tag-green { color: #34d399; font-weight: 600; }
+
     .stat-val {
-      font-size: 2.1rem;
+      font-size: 2.15rem;
       font-weight: 700;
       font-family: 'JetBrains Mono', monospace;
       margin-top: 0.3rem;
@@ -236,36 +292,39 @@
       margin-top: 0.4rem;
     }
 
-    /* Tank Visual Graphic */
+    /* Tank Graphic Styling */
     .tank-display-container {
       display: flex;
       align-items: center;
-      gap: 1.5rem;
+      gap: 1.6rem;
     }
 
     .cylinder-svg-wrap {
-      width: 60px;
-      height: 120px;
+      width: 70px;
+      height: 140px;
       position: relative;
       flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
     }
 
-    /* Control Selectors */
+    /* Selectors */
     .selector-bar {
       display: flex;
       align-items: center;
-      gap: 0.6rem;
+      gap: 0.5rem;
       flex-wrap: wrap;
       margin-top: 0.5rem;
     }
 
     .select-pill {
-      background: rgba(255, 255, 255, 0.06);
+      background: rgba(255, 255, 255, 0.05);
       border: 1px solid rgba(255, 255, 255, 0.12);
       color: var(--text-muted);
       padding: 0.35rem 0.75rem;
       border-radius: 8px;
-      font-size: 0.8rem;
+      font-size: 0.78rem;
       font-weight: 600;
       cursor: pointer;
       transition: all 0.2s ease;
@@ -273,7 +332,7 @@
 
     .select-pill:hover, .select-pill.active {
       background: var(--accent-cyan);
-      color: #000;
+      color: #04101e;
       border-color: var(--accent-cyan);
       box-shadow: 0 0 12px rgba(6, 182, 212, 0.4);
     }
@@ -294,7 +353,7 @@
     /* Alert Banner */
     .alert-banner {
       grid-column: span 12;
-      padding: 0.9rem 1.4rem;
+      padding: 0.95rem 1.4rem;
       border-radius: 1rem;
       display: flex;
       align-items: center;
@@ -306,39 +365,81 @@
 
     .alert-normal {
       background: rgba(16, 185, 129, 0.1);
-      border: 1px solid rgba(16, 185, 129, 0.25);
+      border: 1px solid rgba(16, 185, 129, 0.3);
       color: #34d399;
     }
 
     .alert-warning {
       background: rgba(245, 158, 11, 0.12);
-      border: 1px solid rgba(245, 158, 11, 0.3);
+      border: 1px solid rgba(245, 158, 11, 0.35);
       color: #fbbf24;
     }
 
     .alert-critical {
-      background: rgba(239, 68, 68, 0.15);
-      border: 1px solid rgba(239, 68, 68, 0.4);
+      background: rgba(239, 68, 68, 0.18);
+      border: 1px solid rgba(239, 68, 68, 0.5);
       color: #f87171;
-      animation: alertGlow 1.5s infinite alternate;
+      animation: alertGlow 1.2s infinite alternate;
     }
 
     @keyframes alertGlow {
-      from { box-shadow: 0 0 10px rgba(239, 68, 68, 0.2); }
-      to { box-shadow: 0 0 25px rgba(239, 68, 68, 0.5); }
+      from { box-shadow: 0 0 12px rgba(239, 68, 68, 0.25); }
+      to { box-shadow: 0 0 30px rgba(239, 68, 68, 0.65); }
+    }
+
+    /* Live Telemetry Chart Canvas */
+    .chart-container {
+      width: 100%;
+      height: 180px;
+      position: relative;
+      margin-top: 0.5rem;
+    }
+
+    canvas#telemetryChart {
+      width: 100%;
+      height: 100%;
+      display: block;
+      border-radius: 10px;
+    }
+
+    /* Simulation Control Drawer */
+    .sim-panel {
+      background: rgba(15, 23, 42, 0.92);
+      border: 1px solid rgba(6, 182, 212, 0.3);
+      border-radius: 1rem;
+      padding: 1rem 1.4rem;
+      margin-bottom: 1.25rem;
+      display: none;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      box-shadow: 0 10px 25px rgba(6, 182, 212, 0.15);
+    }
+
+    .sim-panel.show {
+      display: flex;
+    }
+
+    .sim-slider {
+      flex: 1;
+      min-width: 220px;
+      accent-color: var(--accent-cyan);
+      height: 8px;
+      cursor: pointer;
     }
 
     footer {
-      margin-top: 2rem;
+      margin-top: 2.5rem;
       color: var(--text-muted);
       font-size: 0.85rem;
       display: flex;
       justify-content: space-between;
       width: 100%;
-      padding-top: 1rem;
+      padding-top: 1.2rem;
       border-top: 1px solid var(--card-border);
       flex-wrap: wrap;
-      gap: 0.5rem;
+      gap: 0.6rem;
     }
 
     code {
@@ -353,78 +454,133 @@
 <body>
 
   <div class="container">
+    <!-- Header -->
     <header>
       <div class="brand">
         <div class="brand-icon">
+          <!-- Medical Oxygen Valve / Cylinder SVG -->
           <svg viewBox="0 0 24 24">
-            <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 14.5v-9l6 4.5-6 4.5z"/>
+            <path d="M12 2C8.69 2 6 4.69 6 8v10c0 2.21 1.79 4 4 4h4c2.21 0 4-1.79 4-4V8c0-3.31-2.69-6-6-6zm0 2c2.21 0 4 1.79 4 4v1H8V8c0-2.21 1.79-4 4-4zm-1 7h2v3h3v2h-3v3h-2v-3H8v-2h3v-3z"/>
           </svg>
         </div>
         <div class="title-group">
-          <h1>ESP32 Oxygen Cylinder Monitor</h1>
-          <p>Real-Time Pressure Tracking & Remaining Oxygen Volume</p>
+          <h1>ESP32 Medical Oxygen Monitor</h1>
+          <p>
+            <span>MPS20N0040D (HX710B 24-bit ADC)</span>
+            <span>•</span>
+            <span id="hwPins">GPIO 26 (OUT) / 25 (SCK)</span>
+          </p>
         </div>
       </div>
 
       <div class="header-actions">
+        <!-- Live Connection Status -->
         <div class="status-badge" id="connBadge">
           <div class="status-dot" id="statusDot"></div>
           <span id="connStatus">Connecting...</span>
         </div>
+
+        <!-- Audio Alert Toggle -->
+        <button class="btn-action" id="audioToggleBtn" onclick="toggleAudioAlarm()" title="Toggle audible alert for critical level (<25%)">
+          <span id="audioIcon">🔔</span>
+          <span id="audioText">Alert: On</span>
+        </button>
+
+        <!-- Test Simulation Mode Toggle -->
+        <button class="btn-action" id="simToggleBtn" onclick="toggleSimPanel()" title="Simulate pressure for demonstration">
+          <span>🧪</span>
+          <span>Simulator</span>
+        </button>
       </div>
     </header>
 
+    <!-- Optional Interactive Demo Simulator Bar -->
+    <div class="sim-panel" id="simPanel">
+      <div style="display: flex; align-items: center; gap: 0.6rem;">
+        <span style="color: var(--accent-cyan); font-weight: 700; font-size: 0.85rem;">TEST SIMULATOR:</span>
+        <span style="font-size: 0.8rem; color: var(--text-muted);">Adjust slider to preview gauge & alarms:</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 1rem; flex: 1; max-width: 500px;">
+        <span style="font-size: 0.75rem; color: #f87171; font-weight: 700;">0%</span>
+        <input type="range" id="simSlider" class="sim-slider" min="0" max="100" value="100" oninput="runSimulation(this.value)">
+        <span style="font-size: 0.75rem; color: #34d399; font-weight: 700;">100%</span>
+        <span id="simValLabel" style="font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; color: var(--text-main); font-weight: 700; min-width: 50px;">100%</span>
+      </div>
+      <button class="select-pill" style="border-radius: 6px;" onclick="resetToLiveHardware()">Exit to Live</button>
+    </div>
+
     <div class="grid">
       <!-- 1. Hero Card: Remaining Oxygen Percentage & Tank Graphic (7 Cols) -->
-      <div class="card col-7" style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.85), rgba(30, 41, 59, 0.7));">
+      <div class="card col-7" style="background: linear-gradient(135deg, rgba(15, 23, 42, 0.88), rgba(30, 41, 59, 0.75));">
         <div class="tank-display-container">
-          <!-- Animated Oxygen Tank SVG Graphic -->
+          <!-- Animated Oxygen Tank SVG Graphic with Tri-Color Fill -->
           <div class="cylinder-svg-wrap">
-            <svg viewBox="0 0 50 110" width="55" height="110">
-              <!-- Tank Cap / Valve -->
-              <rect x="20" y="2" width="10" height="8" rx="2" fill="#94a3b8"/>
-              <rect x="17" y="10" width="16" height="5" rx="1" fill="#64748b"/>
-              <!-- Cylinder Body -->
-              <rect x="5" y="15" width="40" height="90" rx="12" fill="#0f172a" stroke="#334155" stroke-width="2"/>
-              <!-- Fill Level Clip Path -->
+            <svg viewBox="0 0 54 120" width="65" height="135">
+              <!-- Tank Top Valve & Neck -->
+              <rect x="22" y="3" width="10" height="8" rx="2" fill="#94a3b8"/>
+              <rect x="18" y="11" width="18" height="6" rx="2" fill="#64748b"/>
+              <circle cx="27" cy="7" r="2.5" fill="#38bdf8"/>
+              
+              <!-- Cylinder Main Body Outer Shell -->
+              <rect x="6" y="17" width="42" height="96" rx="14" fill="#0b1120" stroke="#334155" stroke-width="2.5"/>
+
+              <!-- Measurement Ticks -->
+              <line x1="42" y1="38" x2="48" y2="38" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/> <!-- 75% -->
+              <line x1="42" y1="62" x2="48" y2="62" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/> <!-- 50% -->
+              <line x1="42" y1="86" x2="48" y2="86" stroke="rgba(255,255,255,0.3)" stroke-width="1.5"/> <!-- 25% -->
+
+              <!-- Liquid / Gas Fill Clip Path -->
               <defs>
                 <clipPath id="cylinderClip">
-                  <rect x="6" y="16" width="38" height="88" rx="11"/>
+                  <rect x="8" y="19" width="38" height="92" rx="12"/>
                 </clipPath>
-              </defs>
-              <!-- Liquid / Gas Fill -->
-              <g clip-path="url(#cylinderClip)">
-                <rect id="tankFillSvg" x="6" y="16" width="38" height="88" fill="url(#tankGrad)" style="transition: y 0.4s ease, height 0.4s ease;"/>
-              </g>
-              <!-- Gradient Definition -->
-              <defs>
+
+                <!-- Dynamic Gradient -->
                 <linearGradient id="tankGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-                  <stop offset="0%" stop-color="#06b6d4"/>
-                  <stop offset="100%" stop-color="#10b981"/>
+                  <stop id="tankGradStop1" offset="0%" stop-color="#10b981"/>
+                  <stop id="tankGradStop2" offset="100%" stop-color="#059669"/>
                 </linearGradient>
               </defs>
+
+              <!-- Gas Fill Level Graphic -->
+              <g clip-path="url(#cylinderClip)">
+                <rect id="tankFillSvg" x="8" y="19" width="38" height="92" fill="url(#tankGrad)" style="transition: y 0.35s ease, height 0.35s ease;"/>
+              </g>
+
+              <!-- Glass Reflection Overlay -->
+              <path d="M 12 22 Q 10 70 12 105" stroke="rgba(255,255,255,0.18)" stroke-width="2" fill="none"/>
             </svg>
           </div>
 
           <!-- Hero Values -->
           <div style="flex-grow: 1;">
             <div class="card-label">
-              <span>Oxygen Remaining</span>
-              <span id="systemStatusLabel" style="font-size: 0.75rem; padding: 0.2rem 0.6rem; border-radius: 99px; background: rgba(16,185,129,0.15); color: #10b981;">NORMAL</span>
+              <span>Oxygen Remaining Level</span>
+              <span id="systemStatusLabel" style="font-size: 0.75rem; padding: 0.25rem 0.75rem; border-radius: 99px; background: var(--o2-green-bg); color: var(--o2-green); font-weight: 700; letter-spacing: 0.05em;">SAFE (100-75%)</span>
             </div>
+
             <div class="hero-val-group">
               <span class="hero-value" id="o2Percent">100.0</span>
-              <span class="unit">%</span>
+              <span class="unit" style="font-size: 1.6rem; font-weight: 700;">%</span>
             </div>
+
+            <!-- Progress Bar -->
             <div class="progress-bar-container">
               <div class="progress-bar-fill" id="o2Progress" style="width: 100%;"></div>
+            </div>
+
+            <!-- Visual Tri-Color Scale Marker Tags -->
+            <div class="range-markers">
+              <span class="range-tag-red">0-25% CRITICAL</span>
+              <span class="range-tag-yellow">25-75% CAUTION</span>
+              <span class="range-tag-green">75-100% SAFE</span>
             </div>
           </div>
         </div>
 
         <!-- Cylinder Model Selector -->
-        <div style="margin-top: 1rem; padding-top: 0.75rem; border-top: 1px solid rgba(255,255,255,0.06);">
-          <div style="font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase;">Cylinder Water Capacity</div>
+        <div style="margin-top: 1.1rem; padding-top: 0.85rem; border-top: 1px solid rgba(255,255,255,0.06);">
+          <div style="font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">Select Cylinder Water Capacity</div>
           <div class="selector-bar">
             <button class="select-pill" onclick="setCylinderSize(2.9, 'Type D (2.9L)')">Type D (2.9L)</button>
             <button class="select-pill" onclick="setCylinderSize(4.7, 'Type E (4.7L)')">Type E (4.7L)</button>
@@ -438,14 +594,16 @@
       <div class="card col-5">
         <div>
           <div class="card-label">
-            <span>Cylinder Pressure</span>
-            <span style="font-size: 0.75rem; color: var(--accent-cyan);" id="pressureKpaDisplay">-- kPa</span>
+            <span>Tank Pressure Gauge</span>
+            <span style="font-size: 0.75rem; color: var(--accent-cyan);" id="pressureKpaDisplay">0.0 kPa (Sensor)</span>
           </div>
-          <div class="stat-val" style="color: var(--accent-cyan);" id="pressureBar">-- <span class="unit">BAR</span></div>
+          <div class="stat-val" style="color: var(--accent-cyan);" id="pressureBar">0.0 <span class="unit">BAR</span></div>
         </div>
         <div>
           <div class="stat-sub" id="pressureChangeLabel">Pressure Drop: <strong style="color: #38bdf8;">0.00 BAR/min</strong></div>
-          <div class="stat-sub" style="font-size: 0.75rem; margin-top: 0.2rem;">Full: 200 BAR | Residual Safe Limit: 10 BAR</div>
+          <div class="stat-sub" style="font-size: 0.75rem; margin-top: 0.2rem; color: #64748b;">
+            Physical: <span id="physicalSensorVal" style="color: #cbd5e1;">0.000 BAR</span> | Full: 200 BAR
+          </div>
         </div>
       </div>
 
@@ -461,7 +619,7 @@
       <!-- 4. Real-Time Consumption / Flow Rate (4 Cols) -->
       <div class="card col-4">
         <div>
-          <div class="card-label">Oxygen Flow Rate</div>
+          <div class="card-label">Oxygen Delivery Flow</div>
           <div class="stat-val" style="color: #60a5fa;" id="flowRate">-- <span class="unit">L/min</span></div>
         </div>
         <div class="stat-sub" id="flowRateSub">Computed consumption gradient</div>
@@ -470,57 +628,69 @@
       <!-- 5. Time Remaining to Empty (4 Cols) -->
       <div class="card col-4">
         <div>
-          <div class="card-label">Time to Empty (0%)</div>
+          <div class="card-label">Time to Depletion (0%)</div>
           <div class="stat-val" style="color: #a78bfa;" id="timeRemaining">-- <span class="unit">mins</span></div>
         </div>
         <div class="stat-sub" id="timeRemainingHuman">Estimating duration...</div>
       </div>
 
-      <!-- 6. Target Threshold Countdown Card (12 Cols) -->
-      <div class="card col-12" style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8)); border-color: rgba(6, 182, 212, 0.3);">
+      <!-- 6. Real-time Live Telemetry Waveform Graph (8 Cols) -->
+      <div class="card col-8">
         <div class="card-label">
-          <span>Target Alert Threshold Countdown</span>
-          <span style="color: var(--accent-cyan); font-weight: 500;" id="targetLabelDisplay">Time to reach 20%</span>
+          <span>Live Telemetry Waveform Trend</span>
+          <span style="color: var(--accent-cyan); font-size: 0.75rem; font-family: 'JetBrains Mono', monospace;" id="chartLiveRate">60s Window • 10Hz Sampling</span>
+        </div>
+        <div class="chart-container">
+          <canvas id="telemetryChart"></canvas>
+        </div>
+      </div>
+
+      <!-- 7. Target Alert Threshold Countdown Card (4 Cols) -->
+      <div class="card col-4" style="background: linear-gradient(135deg, rgba(30, 41, 59, 0.7), rgba(15, 23, 42, 0.8)); border-color: rgba(6, 182, 212, 0.25);">
+        <div>
+          <div class="card-label">
+            <span>Critical Alarm Alert</span>
+            <span style="color: #f59e0b; font-weight: 600;" id="targetLabelDisplay">At 25%</span>
+          </div>
+          <div class="stat-val" style="color: #f59e0b;" id="timeToTargetVal">-- <span class="unit">mins</span></div>
+          <div class="stat-sub" id="timeToTargetHuman">Time before warning trigger</div>
         </div>
 
-        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 1.25rem; margin-top: 0.5rem;">
-          <div>
-            <div class="stat-val" style="color: #f59e0b;" id="timeToTargetVal">-- <span class="unit">mins</span></div>
-            <div class="stat-sub" id="timeToTargetHuman">Select alert threshold below</div>
-          </div>
-
-          <!-- Alert Threshold Presets -->
-          <div>
-            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.4rem; text-transform: uppercase;">Set Warning Level (%)</div>
-            <div class="selector-bar">
-              <button class="select-pill" onclick="setTargetPercent(10)">10%</button>
-              <button class="select-pill" onclick="setTargetPercent(15)">15%</button>
-              <button class="select-pill active" id="btn20" onclick="setTargetPercent(20)">20%</button>
-              <button class="select-pill" onclick="setTargetPercent(25)">25%</button>
-              <button class="select-pill" onclick="setTargetPercent(30)">30%</button>
-              <input type="number" id="customTargetInput" class="target-input" value="20" min="1" max="99" onchange="setTargetPercent(this.value)">
-              <span style="font-size: 0.85rem; color: var(--accent-cyan); font-weight: 600;">%</span>
-            </div>
+        <div style="margin-top: 0.8rem;">
+          <div style="font-size: 0.72rem; color: var(--text-muted); margin-bottom: 0.35rem; text-transform: uppercase;">Warning Level Preset</div>
+          <div class="selector-bar">
+            <button class="select-pill" onclick="setTargetPercent(10)">10%</button>
+            <button class="select-pill" onclick="setTargetPercent(20)">20%</button>
+            <button class="select-pill active" id="btn25" onclick="setTargetPercent(25)">25%</button>
+            <button class="select-pill" onclick="setTargetPercent(30)">30%</button>
+            <input type="number" id="customTargetInput" class="target-input" value="25" min="1" max="99" onchange="setTargetPercent(this.value)">
+            <span style="font-size: 0.8rem; color: var(--accent-cyan); font-weight: 600;">%</span>
           </div>
         </div>
       </div>
 
-      <!-- 7. Status Banner (12 Cols) -->
+      <!-- 8. Medical Status Banner (12 Cols) -->
       <div class="alert-banner alert-normal col-12" id="alertBanner">
-        <span id="alertMsg">System Operating Normally - Adequate Oxygen Supply</span>
-        <span id="lastPacketTime" style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; opacity: 0.8;">--:--:--</span>
+        <div style="display: flex; align-items: center; gap: 0.75rem;">
+          <span id="alertIcon" style="font-size: 1.25rem;">🟢</span>
+          <span id="alertMsg">System Operating Normally - Adequate Oxygen Reserve (100% - 75%)</span>
+        </div>
+        <span id="lastPacketTime" style="font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; opacity: 0.85;">--:--:--</span>
       </div>
     </div>
 
+    <!-- Footer -->
     <footer>
-      <div>ESP32 Ingestion: <code>/data</code></div>
-      <div>Telemetry Engine: <span id="telemetryModeText">Auto (SSE + Polling)</span></div>
-      <div>Platform: Vercel Serverless Ready</div>
+      <div>ESP32 Hardware Ingestion: <code>/data</code></div>
+      <div>Telemetry Mode: <span id="telemetryModeText" style="color: #38bdf8;">Auto (SSE + Polling)</span></div>
+      <div>Cloud Host: <a href="https://oura-j6w4.vercel.app/" target="_blank" style="color: var(--accent-cyan); text-decoration: none;">oura-j6w4.vercel.app</a></div>
     </footer>
   </div>
 
   <script>
-    // Elements
+    // ==========================================
+    // UI Elements
+    // ==========================================
     const connBadge = document.getElementById('connBadge');
     const statusDot = document.getElementById('statusDot');
     const connStatus = document.getElementById('connStatus');
@@ -529,8 +699,12 @@
     const o2Percent = document.getElementById('o2Percent');
     const o2Progress = document.getElementById('o2Progress');
     const tankFillSvg = document.getElementById('tankFillSvg');
+    const tankGradStop1 = document.getElementById('tankGradStop1');
+    const tankGradStop2 = document.getElementById('tankGradStop2');
+
     const pressureBar = document.getElementById('pressureBar');
     const pressureKpaDisplay = document.getElementById('pressureKpaDisplay');
+    const physicalSensorVal = document.getElementById('physicalSensorVal');
     const pressureChangeLabel = document.getElementById('pressureChangeLabel');
 
     const remainingLiters = document.getElementById('remainingLiters');
@@ -546,21 +720,121 @@
 
     const alertBanner = document.getElementById('alertBanner');
     const alertMsg = document.getElementById('alertMsg');
+    const alertIcon = document.getElementById('alertIcon');
     const lastPacketTime = document.getElementById('lastPacketTime');
     const telemetryModeText = document.getElementById('telemetryModeText');
 
+    const simPanel = document.getElementById('simPanel');
+    const simSlider = document.getElementById('simSlider');
+    const simValLabel = document.getElementById('simValLabel');
+    const simToggleBtn = document.getElementById('simToggleBtn');
+    const audioToggleBtn = document.getElementById('audioToggleBtn');
+    const audioIcon = document.getElementById('audioIcon');
+    const audioText = document.getElementById('audioText');
+
+    // ==========================================
     // System Parameters
+    // ==========================================
     let cylinderWaterVolumeL = 10.0;
     let cylinderName = "Standard (10L)";
     const FULL_BAR = 200.0;
-    const EMPTY_BAR = 10.0;
-    let currentTargetPercent = 20.0;
+    const EMPTY_BAR = 10.0; // Residual safety pressure
+    let currentTargetPercent = 25.0; // Aligned with the 25% threshold
+    let audioAlarmEnabled = true;
+    let isSimulating = false;
 
     // Delta Tracking
     let prevBar = null;
     let prevTimestamp = null;
     let smoothedFlowRate = 0.0;
     let latestTelemetry = null;
+
+    // Telemetry History for Waveform Chart (60 data points)
+    const MAX_CHART_POINTS = 60;
+    const chartHistory = [];
+    for (let i = 0; i < MAX_CHART_POINTS; i++) {
+      chartHistory.push({ time: i, percent: 100, bar: 200 });
+    }
+
+    // ==========================================
+    // Web Audio Synthesizer (Zero external dependencies)
+    // ==========================================
+    let audioCtx = null;
+    let lastBeepTime = 0;
+
+    function playAlertBeep(type = 'critical') {
+      if (!audioAlarmEnabled) return;
+      const now = Date.now();
+      if (now - lastBeepTime < 3500) return; // Beep max once every 3.5 seconds
+      lastBeepTime = now;
+
+      try {
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        if (audioCtx.state === 'suspended') {
+          audioCtx.resume();
+        }
+
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+
+        if (type === 'critical') {
+          osc.frequency.setValueAtTime(880, audioCtx.currentTime); // High pitch alarm A5
+          osc.frequency.exponentialRampToValueAtTime(440, audioCtx.currentTime + 0.3);
+          gain.gain.setValueAtTime(0.2, audioCtx.currentTime);
+          gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.35);
+          osc.start();
+          osc.stop(audioCtx.currentTime + 0.35);
+        }
+      } catch (e) {
+        // Audio policy restrictions before first gesture
+      }
+    }
+
+    function toggleAudioAlarm() {
+      audioAlarmEnabled = !audioAlarmEnabled;
+      if (audioAlarmEnabled) {
+        audioIcon.textContent = '🔔';
+        audioText.textContent = 'Alert: On';
+        audioToggleBtn.classList.remove('active');
+      } else {
+        audioIcon.textContent = '🔕';
+        audioText.textContent = 'Alert: Off';
+        audioToggleBtn.classList.add('active');
+      }
+    }
+
+    function toggleSimPanel() {
+      simPanel.classList.toggle('show');
+      simToggleBtn.classList.toggle('active');
+    }
+
+    function runSimulation(val) {
+      isSimulating = true;
+      const pct = parseFloat(val);
+      simValLabel.textContent = `${pct.toFixed(0)}%`;
+      
+      // Calculate simulated telemetry object
+      const simulatedData = {
+        oxygen_percent: pct,
+        pressure_bar: (pct / 100.0) * 0.40,
+        pressure_kpa: (pct / 100.0) * 40.0,
+        remaining_liters: (pct / 100.0) * (cylinderWaterVolumeL * FULL_BAR),
+        status: (pct >= 75) ? 'NORMAL' : (pct >= 25 ? 'CAUTION' : 'CRITICAL'),
+        timestamp: new Date().toLocaleTimeString() + " (Sim)"
+      };
+      updateDashboard(simulatedData);
+    }
+
+    function resetToLiveHardware() {
+      isSimulating = false;
+      simPanel.classList.remove('show');
+      simToggleBtn.classList.remove('active');
+      if (latestTelemetry) updateDashboard(latestTelemetry);
+    }
 
     function setCylinderSize(vol, name) {
       cylinderWaterVolumeL = vol;
@@ -590,57 +864,104 @@
         }
       });
 
-      targetLabelDisplay.textContent = `Time to reach ${num}%`;
+      targetLabelDisplay.textContent = `At ${num}%`;
       if (latestTelemetry) updateDashboard(latestTelemetry);
     }
 
+    // ==========================================
+    // Telemetry Update Core Logic
+    // ==========================================
     function updateDashboard(data) {
-      latestTelemetry = data;
+      if (!isSimulating) {
+        latestTelemetry = data;
+      }
       const now = Date.now();
 
-      // Read raw/sent bar
+      // Read raw/sent telemetry
       let rawBar = (data.pressure_bar !== undefined) ? parseFloat(data.pressure_bar) : 0;
-      let rawKpa = (data.pressure_kpa !== undefined) ? parseFloat(data.pressure_kpa) : (rawBar * 100);
+      let rawKpa = (data.pressure_kpa !== undefined) ? parseFloat(data.pressure_kpa) : (rawBar * 100.0);
 
-      // If testing with 0-0.4 BAR sensor, scale dynamically to 0-200 BAR tank if desired
-      let currentBar = rawBar;
-      if (rawBar < 1.0 && rawBar > 0.0) {
-        // Test scale translation: 0.40 BAR sensor full scale = 200 BAR tank
-        currentBar = (rawBar / 0.40) * FULL_BAR;
-      }
-
-      // 1. Oxygen Percentage
-      let currentO2 = ((currentBar - EMPTY_BAR) / (FULL_BAR - EMPTY_BAR)) * 100.0;
+      // Directly sync Oxygen Percentage with ESP32
+      let currentO2 = (data.oxygen_percent !== undefined) 
+        ? parseFloat(data.oxygen_percent) 
+        : ((rawBar / 0.40) * 100.0);
       currentO2 = Math.min(Math.max(currentO2, 0), 100);
+
+      // Display Oxygen Percentage
       o2Percent.textContent = currentO2.toFixed(1);
       o2Progress.style.width = `${currentO2}%`;
 
-      // Update SVG Tank Graphic Fill Level (height 88 max)
-      const fillHeight = (currentO2 / 100.0) * 88;
-      const fillY = 16 + (88 - fillHeight);
+      // Simulated Medical Cylinder Gauge (0 to 200 BAR)
+      const currentBar = (currentO2 / 100.0) * FULL_BAR;
+      pressureBar.innerHTML = `${currentBar.toFixed(1)} <span class="unit">BAR</span>`;
+      pressureKpaDisplay.textContent = `${rawKpa.toFixed(1)} kPa (Sensor)`;
+      physicalSensorVal.textContent = `${rawBar.toFixed(3)} BAR`;
+
+      // Update SVG Tank Graphic Fill Level (height 92 max, y = 19 + (92 - fillHeight))
+      const fillHeight = (currentO2 / 100.0) * 92;
+      const fillY = 19 + (92 - fillHeight);
       tankFillSvg.setAttribute('y', fillY);
       tankFillSvg.setAttribute('height', fillHeight);
 
-      // Color coding for Oxygen level
-      let colorClass = '#10b981';
-      if (currentO2 <= 15.0) {
-        colorClass = '#ef4444';
-        o2Progress.style.background = 'linear-gradient(90deg, #ef4444, #f87171)';
+      // ==========================================
+      // User's Core Color Specification:
+      // 100% - 75%: GREEN
+      // 75%  - 25%: YELLOW
+      // 25%  - 0%:  RED
+      // ==========================================
+      if (currentO2 < 25.0) {
+        // Red (0% - 25%): Low / Critical
+        o2Progress.style.background = 'linear-gradient(90deg, #ef4444, #dc2626)';
+        o2Progress.style.boxShadow = '0 0 16px rgba(239, 68, 68, 0.65)';
         o2Percent.style.color = '#ef4444';
-      } else if (currentO2 <= 30.0) {
-        colorClass = '#f59e0b';
-        o2Progress.style.background = 'linear-gradient(90deg, #f59e0b, #fbbf24)';
+
+        tankGradStop1.setAttribute('stop-color', '#ef4444');
+        tankGradStop2.setAttribute('stop-color', '#991b1b');
+
+        systemStatusLabel.textContent = 'CRITICAL (<25%)';
+        systemStatusLabel.style.background = 'var(--o2-red-bg)';
+        systemStatusLabel.style.color = 'var(--o2-red)';
+
+        alertBanner.className = 'alert-banner alert-critical col-12';
+        alertIcon.textContent = '🚨';
+        alertMsg.textContent = 'CRITICAL ALERT: Oxygen level depleted below 25%! Switch cylinder immediately!';
+
+        playAlertBeep('critical');
+      } else if (currentO2 < 75.0) {
+        // Yellow (25% - 75%): Moderate / Caution
+        o2Progress.style.background = 'linear-gradient(90deg, #f59e0b, #d97706)';
+        o2Progress.style.boxShadow = '0 0 14px rgba(245, 158, 11, 0.5)';
         o2Percent.style.color = '#f59e0b';
+
+        tankGradStop1.setAttribute('stop-color', '#f59e0b');
+        tankGradStop2.setAttribute('stop-color', '#b45309');
+
+        systemStatusLabel.textContent = 'CAUTION (25-75%)';
+        systemStatusLabel.style.background = 'var(--o2-yellow-bg)';
+        systemStatusLabel.style.color = 'var(--o2-yellow)';
+
+        alertBanner.className = 'alert-banner alert-warning col-12';
+        alertIcon.textContent = '⚠️';
+        alertMsg.textContent = `CAUTION: Oxygen reserve moderate (${currentO2.toFixed(1)}%). Monitor patient delivery.`;
       } else {
-        o2Progress.style.background = 'linear-gradient(90deg, #10b981, #38bdf8)';
+        // Green (75% - 100%): Safe / Normal
+        o2Progress.style.background = 'linear-gradient(90deg, #10b981, #059669)';
+        o2Progress.style.boxShadow = '0 0 14px rgba(16, 185, 129, 0.5)';
         o2Percent.style.color = '#f8fafc';
+
+        tankGradStop1.setAttribute('stop-color', '#10b981');
+        tankGradStop2.setAttribute('stop-color', '#047857');
+
+        systemStatusLabel.textContent = 'OPTIMAL (75-100%)';
+        systemStatusLabel.style.background = 'var(--o2-green-bg)';
+        systemStatusLabel.style.color = 'var(--o2-green)';
+
+        alertBanner.className = 'alert-banner alert-normal col-12';
+        alertIcon.textContent = '🟢';
+        alertMsg.textContent = 'System Operating Normally - Adequate Oxygen Supply (75% - 100%)';
       }
 
-      // 2. Pressure (BAR & kPa)
-      pressureBar.innerHTML = `${currentBar.toFixed(1)} <span class="unit">BAR</span>`;
-      pressureKpaDisplay.textContent = `${rawKpa.toFixed(1)} kPa (Sensor)`;
-
-      // 3. Calculate Changes of Pressure (Delta P / Delta t)
+      // Pressure Change Calculation (Delta P / Delta t)
       let calculatedFlow = 0.0;
       if (prevBar !== null && prevTimestamp !== null && now > prevTimestamp) {
         const dtMinutes = (now - prevTimestamp) / 60000.0;
@@ -660,12 +981,12 @@
       prevBar = currentBar;
       prevTimestamp = now;
 
-      // 4. Remaining Usable Volume (Liters)
+      // Remaining Usable Volume (Liters)
       const usableBar = Math.max(currentBar - EMPTY_BAR, 0);
       const remainingL = usableBar * cylinderWaterVolumeL;
       remainingLiters.innerHTML = `${Math.round(remainingL)} <span class="unit">L</span>`;
 
-      // 5. Flow Rate (L/min)
+      // Oxygen Flow Rate (L/min)
       const activeFlow = (data.flow_rate_lmin && data.flow_rate_lmin > 0.1) 
         ? parseFloat(data.flow_rate_lmin) 
         : (smoothedFlowRate > 0.1 ? smoothedFlowRate : 5.0); // Baseline 5 L/min
@@ -673,18 +994,18 @@
       flowRate.innerHTML = `${activeFlow.toFixed(1)} <span class="unit">L/min</span>`;
       flowRateSub.textContent = (smoothedFlowRate > 0.1) ? "Live dynamic consumption" : "Baseline flow assumption (5 L/min)";
 
-      // 6. Time Remaining to Empty (0%)
+      // Time Remaining to Empty (0%)
       const minsToEmpty = Math.round(remainingL / activeFlow);
       timeRemaining.innerHTML = `${minsToEmpty} <span class="unit">mins</span>`;
       const hrs = Math.floor(minsToEmpty / 60);
       const remMins = minsToEmpty % 60;
       timeRemainingHuman.textContent = hrs > 0 ? `~ ${hrs}h ${remMins}m until cylinder empty` : `~ ${remMins}m until cylinder empty`;
 
-      // 7. Time Remaining to Target Threshold (e.g. 20%)
+      // Time Remaining to Warning Threshold (e.g. 25%)
       const targetBar = EMPTY_BAR + (currentTargetPercent / 100.0) * (FULL_BAR - EMPTY_BAR);
       if (currentBar <= targetBar) {
         timeToTargetVal.innerHTML = `<span style="color: #ef4444; font-size: 1.5rem;">ALERT REACHED</span>`;
-        timeToTargetHuman.textContent = `Oxygen is at or below target threshold (${currentTargetPercent}%)`;
+        timeToTargetHuman.textContent = `Oxygen is at or below alert threshold (${currentTargetPercent}%)`;
       } else {
         const volumeToTarget = (currentBar - targetBar) * cylinderWaterVolumeL;
         const minsToTarget = Math.round(volumeToTarget / activeFlow);
@@ -692,38 +1013,133 @@
         const tHrs = Math.floor(minsToTarget / 60);
         const tMins = minsToTarget % 60;
         timeToTargetHuman.textContent = tHrs > 0 
-          ? `~ ${tHrs}h ${tMins}m remaining until target ${currentTargetPercent}%`
-          : `~ ${tMins}m remaining until target ${currentTargetPercent}%`;
-      }
-
-      // 8. Alert Banner & Status
-      const status = (currentO2 <= 15.0) ? 'CRITICAL' : (currentO2 <= currentTargetPercent ? 'LOW' : 'NORMAL');
-      systemStatusLabel.textContent = status;
-
-      alertBanner.className = 'alert-banner col-12';
-      if (status === 'CRITICAL') {
-        alertBanner.classList.add('alert-critical');
-        alertMsg.textContent = 'CRITICAL ALERT: Oxygen level depleted! Switch cylinder immediately!';
-        systemStatusLabel.style.background = 'rgba(239, 68, 68, 0.2)';
-        systemStatusLabel.style.color = '#ef4444';
-      } else if (status === 'LOW') {
-        alertBanner.classList.add('alert-warning');
-        alertMsg.textContent = `WARNING: Oxygen level at or approaching target alert threshold (${currentTargetPercent}%).`;
-        systemStatusLabel.style.background = 'rgba(245, 158, 11, 0.2)';
-        systemStatusLabel.style.color = '#f59e0b';
-      } else {
-        alertBanner.classList.add('alert-normal');
-        alertMsg.textContent = 'System Operating Normally - Adequate Oxygen Supply';
-        systemStatusLabel.style.background = 'rgba(16, 185, 129, 0.15)';
-        systemStatusLabel.style.color = '#10b981';
+          ? `~ ${tHrs}h ${tMins}m remaining until ${currentTargetPercent}%`
+          : `~ ${tMins}m remaining until ${currentTargetPercent}%`;
       }
 
       // Timestamp
       lastPacketTime.textContent = data.timestamp || new Date().toLocaleTimeString();
+
+      // Push to Waveform Chart
+      chartHistory.shift();
+      chartHistory.push({ time: Date.now(), percent: currentO2, bar: currentBar });
+      drawWaveformChart();
     }
 
     // ==========================================
-    // Resilient Connection: SSE with Polling Fallback (for Vercel)
+    // Real-Time Canvas Waveform Chart Renderer
+    // ==========================================
+    const canvas = document.getElementById('telemetryChart');
+    const ctx = canvas.getContext('2d');
+
+    function resizeCanvas() {
+      const rect = canvas.parentElement.getBoundingClientRect();
+      canvas.width = rect.width * window.devicePixelRatio;
+      canvas.height = rect.height * window.devicePixelRatio;
+      ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    function drawWaveformChart() {
+      const w = canvas.parentElement.clientWidth;
+      const h = canvas.parentElement.clientHeight;
+      if (w <= 0 || h <= 0) return;
+
+      ctx.clearRect(0, 0, w, h);
+
+      // Draw subtle medical grid lines
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+      ctx.lineWidth = 1;
+      
+      // Horizontal threshold lines: 75% and 25%
+      const y75 = h - (0.75 * (h - 24)) - 12;
+      const y25 = h - (0.25 * (h - 24)) - 12;
+
+      ctx.beginPath();
+      ctx.setLineDash([4, 4]);
+      ctx.moveTo(0, y75);
+      ctx.lineTo(w, y75);
+      ctx.moveTo(0, y25);
+      ctx.lineTo(w, y25);
+      ctx.stroke();
+      ctx.setLineDash([]); // Reset dash
+
+      // Grid labels
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.25)';
+      ctx.font = '10px "JetBrains Mono"';
+      ctx.fillText('75% SAFE', 6, y75 - 4);
+      ctx.fillText('25% CRIT', 6, y25 - 4);
+
+      if (chartHistory.length < 2) return;
+
+      const stepX = w / (MAX_CHART_POINTS - 1);
+
+      // Create Gradient for Wave Area
+      const latestPct = chartHistory[chartHistory.length - 1].percent;
+      let strokeColor = '#10b981';
+      let gradColorTop = 'rgba(16, 185, 129, 0.35)';
+      let gradColorBottom = 'rgba(16, 185, 129, 0.0)';
+
+      if (latestPct < 25.0) {
+        strokeColor = '#ef4444';
+        gradColorTop = 'rgba(239, 68, 68, 0.4)';
+      } else if (latestPct < 75.0) {
+        strokeColor = '#f59e0b';
+        gradColorTop = 'rgba(245, 158, 11, 0.35)';
+      }
+
+      const areaGrad = ctx.createLinearGradient(0, 0, 0, h);
+      areaGrad.addColorStop(0, gradColorTop);
+      areaGrad.addColorStop(1, gradColorBottom);
+
+      // Path for Under-fill
+      ctx.beginPath();
+      for (let i = 0; i < chartHistory.length; i++) {
+        const x = i * stepX;
+        const normalized = Math.min(Math.max(chartHistory[i].percent / 100.0, 0), 1);
+        const y = h - (normalized * (h - 24)) - 12;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.lineTo(w, h);
+      ctx.lineTo(0, h);
+      ctx.closePath();
+      ctx.fillStyle = areaGrad;
+      ctx.fill();
+
+      // Stroke Line
+      ctx.beginPath();
+      for (let i = 0; i < chartHistory.length; i++) {
+        const x = i * stepX;
+        const normalized = Math.min(Math.max(chartHistory[i].percent / 100.0, 0), 1);
+        const y = h - (normalized * (h - 24)) - 12;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2.5;
+      ctx.shadowColor = strokeColor;
+      ctx.shadowBlur = 10;
+      ctx.stroke();
+      ctx.shadowBlur = 0; // Reset shadow
+
+      // Draw Head Dot on latest value
+      const lastX = (chartHistory.length - 1) * stepX;
+      const lastNorm = Math.min(Math.max(latestPct / 100.0, 0), 1);
+      const lastY = h - (lastNorm * (h - 24)) - 12;
+
+      ctx.beginPath();
+      ctx.arc(lastX - 2, lastY, 4.5, 0, 2 * Math.PI);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+
+    // ==========================================
+    // Telemetry Link: SSE with Auto-Polling Fallback
     // ==========================================
     let pollInterval = null;
 
@@ -731,15 +1147,16 @@
       if (pollInterval) return;
       telemetryModeText.textContent = "Live Polling (Vercel Ready)";
       pollInterval = setInterval(async () => {
+        if (isSimulating) return; // Don't overwrite if user is actively using simulator
         try {
           const res = await fetch('/data');
           if (res.ok) {
             const data = await res.json();
             updateDashboard(data);
-            connStatus.textContent = 'Telemetry Active (HTTP)';
+            connStatus.textContent = 'Hardware Telemetry (Live)';
             connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-            statusDot.style.backgroundColor = '#10b981';
-            statusDot.style.boxShadow = '0 0 10px #10b981';
+            statusDot.style.backgroundColor = 'var(--o2-green)';
+            statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
           }
         } catch (e) {
           connStatus.textContent = 'Connecting...';
@@ -754,11 +1171,12 @@
         connStatus.textContent = 'Stream Active (SSE)';
         telemetryModeText.textContent = "Server-Sent Events (SSE)";
         connBadge.style.borderColor = 'rgba(16, 185, 129, 0.4)';
-        statusDot.style.backgroundColor = '#10b981';
-        statusDot.style.boxShadow = '0 0 10px #10b981';
+        statusDot.style.backgroundColor = 'var(--o2-green)';
+        statusDot.style.boxShadow = '0 0 10px var(--o2-green)';
       };
 
       evtSource.onmessage = function(event) {
+        if (isSimulating) return;
         try {
           const data = JSON.parse(event.data);
           updateDashboard(data);
@@ -768,18 +1186,25 @@
       };
 
       evtSource.onerror = function() {
-        // SSE disconnected (standard behavior on Vercel Serverless) -> Fall back to polling
         startPollingFallback();
       };
     } catch (err) {
       startPollingFallback();
     }
 
-    // Initial fetch to load immediately
+    // Immediate initial fetch on load
     fetch('/data')
       .then(r => r.json())
-      .then(d => updateDashboard(d))
-      .catch(() => {});
+      .then(d => {
+        updateDashboard(d);
+        connStatus.textContent = 'Hardware Telemetry (Live)';
+      })
+      .catch(() => {
+        startPollingFallback();
+      });
+
+    // Initial canvas render
+    drawWaveformChart();
   </script>
 </body>
 </html>

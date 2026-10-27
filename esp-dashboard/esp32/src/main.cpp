@@ -33,89 +33,64 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 const char* WIFI_SSID  = "Rushikesh";
 const char* WIFI_PASS  = "";
 
-// Use either your local laptop IP: "http://10.20.235.7:3000/data"
-// OR your live Vercel URL: "https://your-vercel-domain.vercel.app/data"
-const char* SERVER_URL = "http://10.20.235.7:3000/data";
+// Live Vercel Production URL for Cloud Telemetry
+const char* SERVER_URL = "https://oura-j6w4.vercel.app/data";
 
-unsigned long lastWifiRetryMs = 0;
-bool wifiWasConnected = false;
-
-void connectToHotspot() {
-  Serial.println("\n[WiFi] Scanning for hotspot...");
-  int n = WiFi.scanNetworks();
-  String targetSsid = "Rushikesh "; // Fallback with detected trailing space
-  
-  for (int i = 0; i < n; i++) {
-    String found = WiFi.SSID(i);
-    Serial.printf("  Found: '%s' (RSSI: %d)\n", found.c_str(), WiFi.RSSI(i));
-    if (found.startsWith("Rushikesh")) {
-      targetSsid = found;
-      Serial.printf("  -> Matched Hotspot SSID: '%s'\n", targetSsid.c_str());
-      break;
-    }
-  }
-
-  Serial.printf("[WiFi] Connecting to SSID: '%s'...\n", targetSsid.c_str());
-  WiFi.disconnect();
-  WiFi.begin(targetSsid.c_str(), WIFI_PASS);
-}
+volatile bool wifiIsConnected = false;
 
 // ==========================================
 // 3. Digital Air Pressure Sensor (MPS20N0040D + HX710B)
 // ==========================================
-#define SENSOR_OUT_PIN  26  // Data Pin (OUT) -> GPIO 26
-#define SENSOR_SCK_PIN  25  // Clock Pin (SCK) -> GPIO 25
+int activeOutPin = 26; // Data Pin (OUT) - GPIO 26
+int activeSckPin = 25; // Clock Pin (SCK) - GPIO 25
 
 // Sensor Specifications: 0 to 40 kPa (0 to 0.40 BAR)
 const float MAX_SENSOR_KPA = 40.0;
-const float MAX_SENSOR_BAR = 0.40;
 const float COUNTS_PER_KPA = 75000.0; // Calibration scale factor for HX710B 24-bit ADC
 
-long zeroOffset = 0;
+long zeroOffset = 3620000; // Baseline room atmospheric pressure (~3.62M counts)
 bool sensorDetected = false;
+long lastRawReading = 0;
 
-unsigned long lastUpdateMs = 0;
-const unsigned long UPDATE_INTERVAL_MS = 150; // Fast 150ms screen refresh for instant breath response
-
-unsigned long lastHttpMs = 0;
-const unsigned long HTTP_INTERVAL_MS = 1000; // Send telemetry to web server every 1 second
+// Global Live Telemetry State (shared with Core 0 telemetry task)
+portMUX_TYPE stateMux = portMUX_INITIALIZER_UNLOCKED;
+volatile float livePressureKpa = 0.0;
+volatile float livePressureBar = 0.0;
+volatile float livePercent = 0.0;
+char liveStatusBuf[16] = "IDLE";
 
 // ==========================================
-// 4. HX710B Digital Reading Driver
+// 4. HX710B 24-Bit Reading Driver (Synchronized to 10Hz)
 // ==========================================
 portMUX_TYPE hx710Mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Global Live Telemetry State
-float livePressureKpa = 0.0;
-float livePressureBar = 0.0;
-float livePercent = 0.0;
-String liveStatusStr = "IDLE";
-
-long readHX710BRaw() {
-  // Wait until OUT pin goes LOW (data ready) with 150ms timeout (10Hz = 100ms cycle)
+long readHX710BWithTimeout(int timeoutMs) {
+  digitalWrite(activeSckPin, LOW);
   unsigned long start = millis();
-  while (digitalRead(SENSOR_OUT_PIN) == HIGH) {
-    if (millis() - start > 150) {
-      return -1; // Busy or timeout
+
+  // Wait until OUT pin goes LOW (data ready)
+  while (digitalRead(activeOutPin) == HIGH) {
+    if (millis() - start > (unsigned long)timeoutMs) {
+      return -1; // Conversion not ready or timeout
     }
+    delayMicroseconds(50);
   }
 
-  // Prevent Wi-Fi interrupts from glitching bit clocking
   portENTER_CRITICAL(&hx710Mux);
 
   long count = 0;
   for (int i = 0; i < 24; i++) {
-    digitalWrite(SENSOR_SCK_PIN, HIGH);
+    digitalWrite(activeSckPin, HIGH);
     delayMicroseconds(2);
-    count = (count << 1) | digitalRead(SENSOR_OUT_PIN);
-    digitalWrite(SENSOR_SCK_PIN, LOW);
+    count = (count << 1) | digitalRead(activeOutPin);
+    digitalWrite(activeSckPin, LOW);
     delayMicroseconds(2);
   }
 
-  // 25th clock pulse: Sets differential input mode, Gain 128 for next reading
-  digitalWrite(SENSOR_SCK_PIN, HIGH);
+  // 25th clock pulse: Sets Channel A, Gain 128 for next conversion
+  digitalWrite(activeSckPin, HIGH);
   delayMicroseconds(2);
-  digitalWrite(SENSOR_SCK_PIN, LOW);
+  digitalWrite(activeSckPin, LOW);
   delayMicroseconds(2);
 
   portEXIT_CRITICAL(&hx710Mux);
@@ -127,22 +102,28 @@ long readHX710BRaw() {
   return count;
 }
 
+// Tare Calibration at startup: Takes clean 10-sample average of room air
 void tareSensor() {
-  Serial.println("\n[Sensor] Calibrating zero offset baseline...");
+  Serial.println("\n[Sensor] Initializing baseline calibration...");
+  pinMode(activeSckPin, OUTPUT);
+  digitalWrite(activeSckPin, LOW);
+  pinMode(activeOutPin, INPUT_PULLUP);
+
   long sum = 0;
   int validSamples = 0;
-  
-  // Wait for sensor to settle
+
+  // Settle time for power rail
   delay(300);
 
-  for (int i = 0; i < 12; i++) {
-    long val = readHX710BRaw();
-    if (val > 100000) { // Valid raw sensor reading
+  // Take 10 clean samples with 120ms delay (clean 10Hz cycle sync)
+  for (int i = 0; i < 10; i++) {
+    long val = readHX710BWithTimeout(150);
+    if (val > 1000000) {
       sum += val;
       validSamples++;
-      Serial.printf("  Sample #%d: %ld\n", validSamples, val);
+      Serial.printf("  Tare Sample #%d: %ld\n", validSamples, val);
     }
-    delay(120); // 120ms delay ensures a fresh 10Hz conversion
+    delay(120);
   }
 
   if (validSamples >= 3) {
@@ -150,10 +131,9 @@ void tareSensor() {
     sensorDetected = true;
     Serial.printf("[Sensor] SUCCESS! Tare Zero Baseline: %ld (from %d samples)\n", zeroOffset, validSamples);
   } else {
-    // Fallback baseline if startup was noisy
-    zeroOffset = 2769000; // Expected ambient baseline for MPS20N0040D
+    zeroOffset = 3620000; // Expected ambient baseline
     sensorDetected = true;
-    Serial.printf("[Sensor] Using standard baseline: %ld\n", zeroOffset);
+    Serial.printf("[Sensor] Using ambient baseline: %ld\n", zeroOffset);
   }
 }
 
@@ -179,6 +159,10 @@ void drawStaticDashboardUI() {
   tft.setTextSize(1);
   tft.print("PRESSURE LEVEL");
 
+  // Progress Bar Outline
+  tft.drawRect(10, 94, 140, 12, ILI9341_DARKGREY);
+  tft.fillRect(11, 95, 138, 10, ILI9341_BLACK);
+
   // 3. Top-Right Box: Pressure BAR (Width: 156, Height: 98)
   tft.drawRoundRect(160, 32, 156, 98, 6, ILI9341_DARKGREY);
   tft.setCursor(166, 38);
@@ -186,12 +170,24 @@ void drawStaticDashboardUI() {
   tft.setTextSize(1);
   tft.print("PRESSURE (BAR)");
 
+  tft.fillRect(166, 104, 144, 12, ILI9341_BLACK);
+  tft.setCursor(166, 104);
+  tft.setTextColor(ILI9341_LIGHTGREY);
+  tft.setTextSize(1);
+  tft.print("Max: 0.400 BAR");
+
   // 4. Bottom-Left Box: Pressure in kPa (Width: 152, Height: 102)
   tft.drawRoundRect(4, 134, 152, 102, 6, ILI9341_DARKGREY);
   tft.setCursor(10, 140);
   tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
   tft.print("PRESSURE (kPa)");
+
+  tft.fillRect(10, 206, 140, 12, ILI9341_BLACK);
+  tft.setCursor(10, 206);
+  tft.setTextColor(ILI9341_LIGHTGREY);
+  tft.setTextSize(1);
+  tft.print("Range: 0-40 kPa");
 
   // 5. Bottom-Right Box: Sensor Status (Width: 156, Height: 102)
   tft.drawRoundRect(160, 134, 156, 102, 6, ILI9341_DARKGREY);
@@ -201,12 +197,21 @@ void drawStaticDashboardUI() {
   tft.print("AIR FLOW STATUS");
 }
 
-void updateDisplayData(float currentBar, float currentKpa, float percent, String statusStr) {
-  uint16_t color = ILI9341_GREEN;
-  if (percent > 60.0) color = ILI9341_YELLOW;
-  if (percent > 85.0) color = ILI9341_RED;
+void updateDisplayData(float currentBar, float currentKpa, float percent, const char* statusStr) {
+  static int lastBarW = 0;
+  static uint16_t lastColor = 0xFFFF;
 
-  // --- 1. Top-Left Box: Pressure % & Progress Bar ---
+  // Color thresholds: 100-75% Green, 75-25% Yellow, 25-0% Red
+  uint16_t color = ILI9341_RED;
+  if (percent >= 75.0) {
+    color = ILI9341_GREEN;
+  } else if (percent >= 25.0) {
+    color = ILI9341_YELLOW;
+  } else {
+    color = ILI9341_RED;
+  }
+
+  // --- 1. Top-Left Box: Pressure % ---
   tft.fillRect(95, 36, 58, 12, ILI9341_BLACK);
   tft.setCursor(95, 38);
   tft.setTextColor(color);
@@ -221,12 +226,25 @@ void updateDisplayData(float currentBar, float currentKpa, float percent, String
   tft.setTextSize(2);
   tft.print("%");
 
-  // Progress Bar
-  tft.drawRect(10, 94, 140, 12, ILI9341_DARKGREY);
-  tft.fillRect(11, 95, 138, 10, ILI9341_BLACK);
+  // Zero-Flicker Differential Progress Bar Animation
   int barW = (int)((percent / 100.0) * 138.0);
   if (barW > 138) barW = 138;
-  if (barW > 0) tft.fillRect(11, 95, barW, 10, color);
+  if (barW < 0) barW = 0;
+
+  if (color != lastColor) {
+    // If color threshold crossed, redraw full bar with new color
+    tft.fillRect(11, 95, 138, 10, ILI9341_BLACK);
+    if (barW > 0) tft.fillRect(11, 95, barW, 10, color);
+    lastColor = color;
+  } else {
+    // Smooth differential fill (only modifies changed pixels - zero flicker!)
+    if (barW > lastBarW) {
+      tft.fillRect(11 + lastBarW, 95, barW - lastBarW, 10, color);
+    } else if (barW < lastBarW) {
+      tft.fillRect(11 + barW, 95, lastBarW - barW, 10, ILI9341_BLACK);
+    }
+  }
+  lastBarW = barW;
 
   // --- 2. Top-Right Box: Pressure (BAR with 3 Decimals) ---
   tft.fillRect(166, 54, 144, 40, ILI9341_BLACK);
@@ -237,12 +255,6 @@ void updateDisplayData(float currentBar, float currentKpa, float percent, String
   tft.setTextSize(1);
   tft.print(" BAR");
 
-  tft.fillRect(166, 104, 144, 12, ILI9341_BLACK);
-  tft.setCursor(166, 104);
-  tft.setTextColor(ILI9341_LIGHTGREY);
-  tft.setTextSize(1);
-  tft.print("Max: 0.400 BAR");
-
   // --- 3. Bottom-Left Box: Pressure in kPa ---
   tft.fillRect(10, 156, 140, 40, ILI9341_BLACK);
   tft.setCursor(10, 158);
@@ -252,16 +264,10 @@ void updateDisplayData(float currentBar, float currentKpa, float percent, String
   tft.setTextSize(1);
   tft.print(" kPa");
 
-  tft.fillRect(10, 206, 140, 12, ILI9341_BLACK);
-  tft.setCursor(10, 206);
-  tft.setTextColor(ILI9341_LIGHTGREY);
-  tft.setTextSize(1);
-  tft.print("Range: 0-40 kPa");
-
   // --- 4. Bottom-Right Box: Live Status ---
   tft.fillRect(166, 156, 144, 40, ILI9341_BLACK);
   tft.setCursor(166, 160);
-  if (percent > 3.0) {
+  if (percent > 2.0) {
     tft.setTextColor(ILI9341_GREEN);
     tft.setTextSize(2);
     tft.print("FLOWING");
@@ -273,14 +279,9 @@ void updateDisplayData(float currentBar, float currentKpa, float percent, String
 
   tft.fillRect(166, 204, 144, 14, ILI9341_BLACK);
   tft.setCursor(166, 206);
-  tft.setTextColor(ILI9341_LIGHTGREY);
   tft.setTextSize(1);
-  if (sensorDetected) {
-    tft.print("Sensor: READY");
-  } else {
-    tft.setTextColor(ILI9341_RED);
-    tft.print("Check Pins G26/25");
-  }
+  tft.setTextColor(ILI9341_LIGHTGREY);
+  tft.printf("Pins: G%d/G%d | %ldk", activeOutPin, activeSckPin, lastRawReading / 1000);
 }
 
 void updateWifiStatusUI(bool connected) {
@@ -297,17 +298,86 @@ void updateWifiStatusUI(bool connected) {
 }
 
 // ==========================================
-// 6. Setup & Main Loop
+// 6. FreeRTOS Background Telemetry Task (Runs on Core 0)
+// ==========================================
+void telemetryTask(void *pvParameters) {
+  unsigned long lastSend = 0;
+
+  for (;;) {
+    // 1. Manage Wi-Fi connection in the background
+    if (WiFi.status() != WL_CONNECTED) {
+      wifiIsConnected = false;
+
+      WiFi.begin("Rushikesh ", WIFI_PASS);
+      unsigned long tryStart = millis();
+      while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 3000) {
+        vTaskDelay(200 / portTICK_PERIOD_MS);
+      }
+
+      if (WiFi.status() != WL_CONNECTED) {
+        WiFi.begin("Rushikesh", WIFI_PASS);
+        tryStart = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - tryStart < 3000) {
+          vTaskDelay(200 / portTICK_PERIOD_MS);
+        }
+      }
+
+      wifiIsConnected = (WiFi.status() == WL_CONNECTED);
+    } else {
+      wifiIsConnected = true;
+    }
+
+    // 2. Send Telemetry every 2.5 seconds if connected
+    if (wifiIsConnected && (millis() - lastSend >= 2500)) {
+      lastSend = millis();
+
+      float tBar, tKpa, tPct;
+      char tStatus[16];
+      portENTER_CRITICAL(&stateMux);
+      tBar = livePressureBar;
+      tKpa = livePressureKpa;
+      tPct = livePercent;
+      strncpy(tStatus, liveStatusBuf, sizeof(tStatus));
+      portEXIT_CRITICAL(&stateMux);
+
+      float simulatedTankBar = (tPct / 100.0) * 200.0;
+      float remainingLiters = simulatedTankBar * 10.0;
+
+      char body[256];
+      snprintf(body, sizeof(body),
+        "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
+        tBar, tKpa, tPct, remainingLiters, tStatus);
+
+      WiFiClientSecure secureClient;
+      secureClient.setInsecure(); // Allow Vercel SSL
+      HTTPClient http;
+      if (http.begin(secureClient, SERVER_URL)) {
+        http.addHeader("Content-Type", "application/json");
+        http.setTimeout(2500);
+        int httpCode = http.POST(body);
+        if (httpCode > 0) {
+          Serial.printf("[Cloud] POST -> %d | %.1f kPa (%.1f%%)\n", httpCode, tKpa, tPct);
+        }
+        http.end();
+      }
+    }
+
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+  }
+}
+
+// ==========================================
+// 7. Setup & Main Loop (Runs on Core 1)
 // ==========================================
 void setup() {
   Serial.begin(115200);
-  delay(500);
+  delay(300);
   Serial.println("\n--- Initializing ESP32 Air Pressure Monitor & ST7789 TFT Display ---");
 
   // Configure Digital Sensor Pins
-  pinMode(SENSOR_SCK_PIN, OUTPUT);
-  pinMode(SENSOR_OUT_PIN, INPUT);
-  digitalWrite(SENSOR_SCK_PIN, LOW);
+  pinMode(activeSckPin, OUTPUT);
+  pinMode(activeOutPin, INPUT_PULLUP);
+  digitalWrite(activeSckPin, LOW);
 
   // Initialize ST7789 TFT Display in Landscape Mode (320x240)
   tft.init(240, 320);
@@ -315,124 +385,111 @@ void setup() {
   tft.invertDisplay(false);
   drawStaticDashboardUI();
 
-  // Show "Calibrating..." notice on screen
+  // Show "CALIBRATING ZERO..." notice on screen
   tft.setCursor(166, 160);
   tft.setTextColor(ILI9341_YELLOW);
   tft.setTextSize(2);
-  tft.print("CALIBRATING");
-  delay(200);
+  tft.print("ZEROING...");
 
-  // Auto-Tare the sensor at startup (zero baseline)
+  // Calibrate Zero Baseline at atmospheric room air
   tareSensor();
 
-  // Connect to Wi-Fi with auto-detection of exact SSID
-  WiFi.mode(WIFI_STA);
-  connectToHotspot();
-  Serial.print("Connecting to Wi-Fi");
-  int tries = 0;
-  while (WiFi.status() != WL_CONNECTED && tries < 10) { // 5-second check
-    delay(500);
-    Serial.print(".");
-    tries++;
-  }
+  // Draw initial clean 0.0 values
+  updateDisplayData(0.0, 0.0, 0.0, "IDLE");
 
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiWasConnected = true;
-    Serial.println("\nWiFi Connected! IP: " + WiFi.localIP().toString());
-    updateWifiStatusUI(true);
-  } else {
-    Serial.println("\nWiFi connection pending (will auto-reconnect in loop)...");
-    updateWifiStatusUI(false);
-  }
+  // Start Wi-Fi in background
+  WiFi.mode(WIFI_STA);
+
+  // Spawn Background FreeRTOS Telemetry Task on Core 0
+  xTaskCreatePinnedToCore(
+    telemetryTask,
+    "TelemetryTask",
+    8192,
+    NULL,
+    1,
+    NULL,
+    0 // Core 0
+  );
 }
 
 void loop() {
+  static unsigned long lastSensorRead = 0;
+  static bool lastWifiState = false;
+  static float smoothedKpa = 0.0;
+  static float displayedKpa = -1.0;
+
+  // 4-point rolling average buffer to cancel electronic noise
+  static long rawBuf[4] = {0, 0, 0, 0};
+  static int rawBufIdx = 0;
+  static bool rawBufFilled = false;
+
   unsigned long currentMs = millis();
 
-  // 1. Read Digital Sensor & Refresh Screen (when a valid sample is ready)
-  if (currentMs - lastUpdateMs >= UPDATE_INTERVAL_MS) {
-    lastUpdateMs = currentMs;
+  // Read sensor every 110ms (clean 10Hz sync)
+  if (currentMs - lastSensorRead >= 110) {
+    lastSensorRead = currentMs;
 
-    long raw = readHX710BRaw();
+    long raw = readHX710BWithTimeout(130);
+    if (raw > 1000000) {
+      lastRawReading = raw;
 
-    // Only update values if we got a valid reading (raw != -1)
-    if (raw > 100000 && zeroOffset != 0) {
-      long diff = raw - zeroOffset;
-      if (diff < 0) diff = 0; // Filter out slight ambient jitter
+      // Add to rolling window
+      rawBuf[rawBufIdx] = raw;
+      rawBufIdx = (rawBufIdx + 1) % 4;
+      if (rawBufIdx == 0) rawBufFilled = true;
 
-      livePressureKpa = (float)diff / COUNTS_PER_KPA;
-      if (livePressureKpa > MAX_SENSOR_KPA) livePressureKpa = MAX_SENSOR_KPA;
+      long avgRaw = raw;
+      if (rawBufFilled) {
+        avgRaw = (rawBuf[0] + rawBuf[1] + rawBuf[2] + rawBuf[3]) / 4;
+      }
 
-      livePressureBar = livePressureKpa / 100.0; // 100 kPa = 1.0 BAR
-      livePercent = (livePressureKpa / MAX_SENSOR_KPA) * 100.0;
-      liveStatusStr = (livePercent > 3.0) ? "FLOWING" : "IDLE";
+      // Calculate gauge pressure above atmospheric baseline
+      long diff = avgRaw - zeroOffset;
 
-      // 2. Refresh Screen with active values
-      updateDisplayData(livePressureBar, livePressureKpa, livePercent, liveStatusStr);
+      // Hysteresis Noise Deadband: If within 25,000 counts (~0.33 kPa or ~0.8%), snap firmly to ZERO
+      if (diff < 25000) {
+        diff = 0;
+      }
 
-      // 3. Serial Debug Print
-      Serial.printf("Raw: %ld | Delta: %ld | Pressure: %.3f BAR | %.1f kPa | Level: %.1f%%\n",
-                    raw, diff, livePressureBar, livePressureKpa, livePercent);
-    }
-  }
+      float targetKpa = (float)diff / COUNTS_PER_KPA;
+      if (targetKpa > MAX_SENSOR_KPA) targetKpa = MAX_SENSOR_KPA;
 
-  // 4. Background Wi-Fi Auto-Reconnection & Status Tracking
-  if (WiFi.status() != WL_CONNECTED) {
-    if (wifiWasConnected) {
-      wifiWasConnected = false;
-      Serial.println("\n[WiFi] Connection lost. Switching to offline mode.");
-      updateWifiStatusUI(false);
-    }
-
-    if (currentMs - lastWifiRetryMs >= 6000) {
-      lastWifiRetryMs = currentMs;
-      connectToHotspot();
-    }
-  } else {
-    if (!wifiWasConnected) {
-      wifiWasConnected = true;
-      Serial.println("\n[WiFi] Reconnected! IP: " + WiFi.localIP().toString());
-      updateWifiStatusUI(true);
-    }
-  }
-
-  // 5. Send HTTP/HTTPS Telemetry to Dashboard (every 1 second)
-  if (currentMs - lastHttpMs >= HTTP_INTERVAL_MS) {
-    lastHttpMs = currentMs;
-
-    if (WiFi.status() == WL_CONNECTED) {
-      float simulatedTankBar = (livePercent / 100.0) * 200.0;
-      float remainingLiters = simulatedTankBar * 10.0;
-
-      char body[256];
-      snprintf(body, sizeof(body),
-        "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
-        livePressureBar, livePressureKpa, livePercent, remainingLiters, liveStatusStr.c_str());
-
-      String urlStr = String(SERVER_URL);
-      HTTPClient http;
-
-      if (urlStr.startsWith("https://")) {
-        WiFiClientSecure secureClient;
-        secureClient.setInsecure(); // Allow Vercel SSL certificates without root cert bundle
-        if (http.begin(secureClient, urlStr)) {
-          http.addHeader("Content-Type", "application/json");
-          int httpCode = http.POST(body);
-          if (httpCode > 0) {
-            Serial.printf("POST Vercel -> Code: %d\n", httpCode);
-          }
-          http.end();
-        }
+      // High-grade Exponential Smoothing (78% previous + 22% target):
+      // Buttery smooth transition without any jerky jumping
+      if (diff == 0) {
+        smoothedKpa = smoothedKpa * 0.70; // Graceful, damped glide to zero
+        if (smoothedKpa < 0.10) smoothedKpa = 0.0;
       } else {
-        if (http.begin(urlStr)) {
-          http.addHeader("Content-Type", "application/json");
-          int httpCode = http.POST(body);
-          if (httpCode > 0) {
-            Serial.printf("POST Local -> Code: %d\n", httpCode);
-          }
-          http.end();
-        }
+        smoothedKpa = smoothedKpa * 0.78 + targetKpa * 0.22;
+      }
+
+      float currentBar = smoothedKpa / 100.0;
+      float currentPct = (smoothedKpa / MAX_SENSOR_KPA) * 100.0;
+      if (currentPct > 100.0) currentPct = 100.0;
+
+      const char* statusStr = (currentPct > 2.0) ? "FLOWING" : "IDLE";
+
+      // Update shared telemetry state for background Core 0 task
+      portENTER_CRITICAL(&stateMux);
+      livePressureKpa = smoothedKpa;
+      livePressureBar = currentBar;
+      livePercent = currentPct;
+      strncpy(liveStatusBuf, statusStr, sizeof(liveStatusBuf));
+      portEXIT_CRITICAL(&stateMux);
+
+      // Smooth display redraw: Only refresh if digit changed by >= 0.1% or snapped to/from zero
+      if (fabs(smoothedKpa - displayedKpa) >= 0.1 || (smoothedKpa == 0.0 && displayedKpa != 0.0)) {
+        displayedKpa = smoothedKpa;
+        updateDisplayData(currentBar, smoothedKpa, currentPct, statusStr);
       }
     }
   }
+
+  // Update Wi-Fi indicator if connection status changed
+  if (wifiIsConnected != lastWifiState) {
+    lastWifiState = wifiIsConnected;
+    updateWifiStatusUI(lastWifiState);
+  }
+
+  delay(4);
 }
