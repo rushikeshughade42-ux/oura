@@ -993,47 +993,86 @@
 
     function updateFlowCalculations(currentBar) {
       const now = Date.now();
-      let calculatedFlow = 0.0;
+      const CLINICAL_BASELINE_FLOW = 5.0; // 5.0 L/min standard clinical prescription
+      const MAX_CLINICAL_FLOW = 15.0;     // 15.0 L/min max standard delivery
+      const MIN_CLINICAL_FLOW = 1.0;      // 1.0 L/min minimum low flow
+
       if (prevBar !== null && prevTimestamp !== null && now > prevTimestamp) {
         const dtMinutes = (now - prevTimestamp) / 60000.0;
         const dBar = prevBar - currentBar;
 
-        if (dtMinutes > 0.005) {
+        // Rate evaluation window: evaluate every ~300ms to filter electronic and hand tremor noise
+        if (dtMinutes >= 0.005) {
           const barDropRatePerMin = dBar / dtMinutes;
-          pressureChangeLabel.innerHTML = `Pressure Drop: <strong style="color: ${dBar > 0 ? '#f87171' : '#34d399'};">${barDropRatePerMin.toFixed(2)} BAR/min</strong>`;
 
-          if (dBar > 0.01) {
-            const instFlow = (dBar * cylinderWaterVolumeL) / dtMinutes;
-            calculatedFlow = (smoothedFlowRate * 0.7) + (instFlow * 0.3);
-            smoothedFlowRate = calculatedFlow;
+          if (dBar > 0.05) {
+            // Pressure is dropping - compute realistic medical flow rate
+            let instFlow = (dBar * cylinderWaterVolumeL) / dtMinutes;
+            // Clamp to realistic medical delivery range (1 to 15 L/min)
+            instFlow = Math.min(Math.max(instFlow, MIN_CLINICAL_FLOW), MAX_CLINICAL_FLOW);
+            smoothedFlowRate = (smoothedFlowRate > 0.1) 
+              ? (smoothedFlowRate * 0.7) + (instFlow * 0.3) 
+              : instFlow;
+            pressureChangeLabel.innerHTML = `Pressure Drop: <strong style="color: #f87171;">${Math.min(barDropRatePerMin, 10.0).toFixed(2)} BAR/min</strong>`;
+          } else {
+            // Pressure is stable or rising (e.g. held steady at 100% or pressurizing)
+            // Smoothly decay back to standard clinical baseline flow (5 L/min)
+            if (smoothedFlowRate > CLINICAL_BASELINE_FLOW) {
+              smoothedFlowRate = (smoothedFlowRate * 0.8) + (CLINICAL_BASELINE_FLOW * 0.2);
+              if (Math.abs(smoothedFlowRate - CLINICAL_BASELINE_FLOW) < 0.2) {
+                smoothedFlowRate = CLINICAL_BASELINE_FLOW;
+              }
+            } else {
+              smoothedFlowRate = CLINICAL_BASELINE_FLOW;
+            }
+            pressureChangeLabel.innerHTML = `Pressure Status: <strong style="color: #34d399;">Stable / Maintaining</strong>`;
           }
+          prevBar = currentBar;
+          prevTimestamp = now;
         }
+      } else {
+        prevBar = currentBar;
+        prevTimestamp = now;
       }
-      prevBar = currentBar;
-      prevTimestamp = now;
 
-      const activeFlow = (latestTelemetry && latestTelemetry.flow_rate_lmin && latestTelemetry.flow_rate_lmin > 0.1) 
-        ? parseFloat(latestTelemetry.flow_rate_lmin) 
-        : (smoothedFlowRate > 0.1 ? smoothedFlowRate : 5.0); // Baseline 5 L/min
+      // Active flow rate clamped within standard clinical delivery limits
+      let activeFlow = CLINICAL_BASELINE_FLOW;
+      if (latestTelemetry && latestTelemetry.flow_rate_lmin && latestTelemetry.flow_rate_lmin > 0.1) {
+        activeFlow = Math.min(Math.max(parseFloat(latestTelemetry.flow_rate_lmin), MIN_CLINICAL_FLOW), MAX_CLINICAL_FLOW);
+      } else if (smoothedFlowRate > 0.1) {
+        activeFlow = Math.min(Math.max(smoothedFlowRate, MIN_CLINICAL_FLOW), MAX_CLINICAL_FLOW);
+      }
 
       flowRate.innerHTML = `${activeFlow.toFixed(1)} <span class="unit">L/min</span>`;
-      flowRateSub.textContent = (smoothedFlowRate > 0.1) ? "Live dynamic consumption" : "Baseline flow assumption (5 L/min)";
+      flowRateSub.textContent = (Math.abs(activeFlow - CLINICAL_BASELINE_FLOW) > 0.5) 
+        ? "Live dynamic consumption" 
+        : "Standard clinical baseline (5 L/min)";
 
       const usableBar = Math.max(currentBar - EMPTY_BAR, 0);
       const remainingL = usableBar * cylinderWaterVolumeL;
-      const minsToEmpty = Math.round(remainingL / activeFlow);
-      timeRemaining.innerHTML = `${minsToEmpty} <span class="unit">mins</span>`;
-      const hrs = Math.floor(minsToEmpty / 60);
-      const remMins = minsToEmpty % 60;
-      timeRemainingHuman.textContent = hrs > 0 ? `~ ${hrs}h ${remMins}m until cylinder empty` : `~ ${remMins}m until cylinder empty`;
 
+      // Time to Empty (0%) calculation
+      if (currentBar <= EMPTY_BAR || remainingL <= 0) {
+        timeRemaining.innerHTML = `0 <span class="unit">mins</span>`;
+        timeRemainingHuman.textContent = `Cylinder empty (Reserve depleted)`;
+      } else {
+        const minsToEmpty = Math.max(1, Math.round(remainingL / activeFlow));
+        timeRemaining.innerHTML = `${minsToEmpty} <span class="unit">mins</span>`;
+        const hrs = Math.floor(minsToEmpty / 60);
+        const remMins = minsToEmpty % 60;
+        timeRemainingHuman.textContent = hrs > 0 
+          ? `~ ${hrs}h ${remMins}m until cylinder empty` 
+          : `~ ${remMins}m until cylinder empty`;
+      }
+
+      // Time to Custom Alert Threshold calculation
       const targetThresholdBar = EMPTY_BAR + (currentTargetPercent / 100.0) * (FULL_BAR - EMPTY_BAR);
       if (currentBar <= targetThresholdBar) {
         timeToTargetVal.innerHTML = `<span style="color: #ef4444; font-size: 1.5rem;">ALERT REACHED</span>`;
         timeToTargetHuman.textContent = `Oxygen is at or below alert threshold (${currentTargetPercent}%)`;
       } else {
         const volumeToTarget = (currentBar - targetThresholdBar) * cylinderWaterVolumeL;
-        const minsToTarget = Math.round(volumeToTarget / activeFlow);
+        const minsToTarget = Math.max(1, Math.round(volumeToTarget / activeFlow));
         timeToTargetVal.innerHTML = `${minsToTarget} <span class="unit">mins</span>`;
         const tHrs = Math.floor(minsToTarget / 60);
         const tMins = minsToTarget % 60;
