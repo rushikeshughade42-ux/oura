@@ -54,6 +54,58 @@ volatile bool wifiIsConnected = false;
 volatile bool mqttIsConnected = false;
 
 // ==========================================
+// 3. Bluetooth Low Energy (Web Bluetooth NUS)
+// ==========================================
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
+#define BLE_SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define BLE_CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+
+BLEServer *pBleServer = NULL;
+BLECharacteristic *pTxCharacteristic = NULL;
+volatile bool bleDeviceConnected = false;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      bleDeviceConnected = true;
+      Serial.println("[BLE] Web Bluetooth client connected!");
+    }
+
+    void onDisconnect(BLEServer* pServer) {
+      bleDeviceConnected = false;
+      Serial.println("[BLE] Web Bluetooth client disconnected! Restarting advertising...");
+      pServer->getAdvertising()->start();
+    }
+};
+
+void initBLE() {
+  BLEDevice::init("Oura Oxygen Monitor");
+  pBleServer = BLEDevice::createServer();
+  pBleServer->setCallbacks(new MyServerCallbacks());
+
+  BLEService *pService = pBleServer->createService(BLE_SERVICE_UUID);
+
+  pTxCharacteristic = pService->createCharacteristic(
+                        BLE_CHARACTERISTIC_UUID_TX,
+                        BLECharacteristic::PROPERTY_NOTIFY
+                      );
+  pTxCharacteristic->addDescriptor(new BLE2902());
+
+  pService->start();
+
+  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+  pAdvertising->addServiceUUID(BLE_SERVICE_UUID);
+  pAdvertising->setScanResponse(true);
+  pAdvertising->setMinPreferred(0x06);
+  pAdvertising->setMinPreferred(0x12);
+  BLEDevice::startAdvertising();
+  Serial.println("[BLE] Advertising started as 'Oura Oxygen Monitor'");
+}
+
+// ==========================================
 // 3. Digital Air Pressure Sensor (MPS20N0040D + HX710B)
 // ==========================================
 int activeOutPin = 26; // Data Pin (OUT) - GPIO 26
@@ -307,11 +359,14 @@ void updateDisplayData(float currentBar, float currentKpa, float percent, const 
   tft.printf("Pins: G%d/G%d | %ldk", activeOutPin, activeSckPin, lastRawReading / 1000);
 }
 
-void updateCloudStatusUI(bool wifiOk, bool mqttOk) {
+void updateCloudStatusUI(bool wifiOk, bool mqttOk, bool bleOk) {
   tft.fillRect(205, 4, 110, 20, ILI9341_NAVY);
   tft.setCursor(210, 9);
   tft.setTextSize(1);
-  if (!wifiOk) {
+  if (bleOk) {
+    tft.setTextColor(ILI9341_CYAN);
+    tft.print("BLE: LIVE \x10");
+  } else if (!wifiOk) {
     tft.setTextColor(ILI9341_RED);
     tft.print("WiFi: OFF");
   } else if (!mqttOk) {
@@ -402,16 +457,19 @@ void telemetryTask(void *pvParameters) {
     bool valueChanged = (fabs(tPct - lastSentPct) >= 0.1) || (tPct == 0.0 && lastSentPct != 0.0) || (tPct > 0.0 && lastSentPct == 0.0);
     bool shouldSend = false;
 
-    if (wifiIsConnected && mqttClient.connected()) {
-      // 60ms fast dispatch when changing: ultra smooth continuous flow (~16 updates/sec)!
-      if (valueChanged && (now - lastSend >= 60)) {
+    // Check if either Bluetooth or Wi-Fi MQTT is ready to transmit
+    bool canTransmit = bleDeviceConnected || (wifiIsConnected && mqttClient.connected());
+
+    if (canTransmit) {
+      // 50ms fast dispatch when changing: ultra smooth continuous flow (~20 updates/sec)!
+      if (valueChanged && (now - lastSend >= 50)) {
         shouldSend = true;
-      } else if (now - lastSend >= 800) {
+      } else if (now - lastSend >= 500) {
         shouldSend = true; // Steady-state heartbeat
       }
     }
 
-    // 4. Publish telemetry packet (Instant 2ms TCP dispatch!)
+    // 4. Publish telemetry packet (Instant Bluetooth Direct + MQTT Cloud!)
     if (shouldSend) {
       lastSend = now;
       lastSentPct = tPct;
@@ -424,7 +482,16 @@ void telemetryTask(void *pvParameters) {
         "{\"pressure_bar\":%.3f,\"pressure_kpa\":%.1f,\"oxygen_percent\":%.1f,\"remaining_liters\":%.0f,\"status\":\"%s\"}",
         tBar, tKpa, tPct, remainingLiters, tStatus);
 
-      mqttClient.publish(MQTT_TOPIC, body);
+      // Instant Bluetooth Low Energy Dispatch (Sub-15ms direct wireless to browser!)
+      if (bleDeviceConnected && pTxCharacteristic != NULL) {
+        pTxCharacteristic->setValue((uint8_t*)body, strlen(body));
+        pTxCharacteristic->notify();
+      }
+
+      // Cloud MQTT Dispatch (if Wi-Fi online)
+      if (wifiIsConnected && mqttClient.connected()) {
+        mqttClient.publish(MQTT_TOPIC, body);
+      }
     }
 
     vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -466,7 +533,10 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setAutoReconnect(true);
   WiFi.persistent(true);
-  updateCloudStatusUI(false, false);
+  updateCloudStatusUI(false, false, false);
+
+  // Initialize Bluetooth Low Energy (Web Bluetooth)
+  initBLE();
 
   // Spawn Background FreeRTOS Telemetry Task on Core 0
   xTaskCreatePinnedToCore(
@@ -554,11 +624,13 @@ void loop() {
     }
   }
 
-  // Update Cloud Sync indicator on screen header (WiFi & MQTT state)
-  if (wifiIsConnected != lastWifiState || mqttIsConnected != lastMqttState) {
+  // Update Cloud Sync indicator on screen header (WiFi, MQTT & BLE state)
+  static bool lastBleState = false;
+  if (wifiIsConnected != lastWifiState || mqttIsConnected != lastMqttState || bleDeviceConnected != lastBleState) {
     lastWifiState = wifiIsConnected;
     lastMqttState = mqttIsConnected;
-    updateCloudStatusUI(lastWifiState, lastMqttState);
+    lastBleState = bleDeviceConnected;
+    updateCloudStatusUI(lastWifiState, lastMqttState, lastBleState);
   }
 
   delay(4);

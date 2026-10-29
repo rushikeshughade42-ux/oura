@@ -481,6 +481,12 @@
           <span id="connStatus">Connecting...</span>
         </div>
 
+        <!-- Bluetooth Direct Wireless Toggle Button -->
+        <button class="btn-action" id="bleConnectBtn" onclick="toggleBluetooth()" title="Direct Wireless Bluetooth Connection (Zero Network Lag!)" style="background: rgba(6, 182, 212, 0.12); border-color: rgba(6, 182, 212, 0.35); color: #38bdf8;">
+          <span id="bleIcon">⚡</span>
+          <span id="bleText">Connect Bluetooth</span>
+        </button>
+
         <!-- Audio Alert Toggle -->
         <button class="btn-action" id="audioToggleBtn" onclick="toggleAudioAlarm()" title="Toggle audible alert for critical level (<25%)">
           <span id="audioIcon">🔔</span>
@@ -1245,6 +1251,123 @@
     }
 
     // ==========================================
+    // Web Bluetooth API (Zero Network Latency direct BLE Stream!)
+    // ==========================================
+    const BLE_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+    const BLE_CHAR_TX_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e";
+
+    let bleDevice = null;
+    let bleServer = null;
+    let bleCharacteristic = null;
+    let isBleConnected = false;
+
+    const bleConnectBtn = document.getElementById('bleConnectBtn');
+    const bleText = document.getElementById('bleText');
+    const bleIcon = document.getElementById('bleIcon');
+
+    async function toggleBluetooth() {
+      if (isBleConnected) {
+        disconnectBluetooth();
+      } else {
+        await connectBluetooth();
+      }
+    }
+
+    async function connectBluetooth() {
+      if (!navigator.bluetooth) {
+        alert("Web Bluetooth is supported in Google Chrome, Microsoft Edge, and Opera on Windows, Android, and Mac.\n\nPlease open this dashboard in Chrome or Edge!");
+        return;
+      }
+
+      try {
+        if (bleText) bleText.textContent = "Searching...";
+        if (bleIcon) bleIcon.textContent = "🔍";
+
+        bleDevice = await navigator.bluetooth.requestDevice({
+          filters: [
+            { namePrefix: 'Oura' },
+            { services: [BLE_SERVICE_UUID] }
+          ],
+          optionalServices: [BLE_SERVICE_UUID]
+        });
+
+        bleDevice.addEventListener('gattserverdisconnected', onBleDisconnected);
+
+        if (bleText) bleText.textContent = "Connecting...";
+        bleServer = await bleDevice.gatt.connect();
+
+        const service = await bleServer.getPrimaryService(BLE_SERVICE_UUID);
+        bleCharacteristic = await service.getCharacteristic(BLE_CHAR_TX_UUID);
+
+        await bleCharacteristic.startNotifications();
+        bleCharacteristic.addEventListener('characteristicvaluechanged', handleBleNotification);
+
+        isBleConnected = true;
+        if (bleConnectBtn) {
+          bleConnectBtn.style.background = 'rgba(6, 182, 212, 0.28)';
+          bleConnectBtn.style.borderColor = 'var(--accent-cyan)';
+          bleConnectBtn.style.color = 'var(--accent-cyan)';
+        }
+        if (bleText) bleText.textContent = "BLE Connected";
+        if (bleIcon) bleIcon.textContent = "🔵";
+
+        connStatus.textContent = "Bluetooth Direct (15ms ⚡)";
+        connBadge.style.borderColor = "rgba(6, 182, 212, 0.6)";
+        statusDot.style.backgroundColor = "var(--accent-cyan)";
+        statusDot.style.boxShadow = "0 0 12px var(--accent-cyan)";
+      } catch (err) {
+        console.warn("BLE Connection cancelled or failed:", err);
+        resetBleUI();
+      }
+    }
+
+    function handleBleNotification(event) {
+      const value = event.target.value;
+      const decoder = new TextDecoder('utf-8');
+      const jsonStr = decoder.decode(value);
+      try {
+        const data = JSON.parse(jsonStr);
+        lastPacketReceivedTimestamp = Date.now();
+        handleIncomingTelemetry(data);
+        connStatus.textContent = "Bluetooth Direct (15ms ⚡)";
+        connBadge.style.borderColor = "rgba(6, 182, 212, 0.6)";
+        statusDot.style.backgroundColor = "var(--accent-cyan)";
+        statusDot.style.boxShadow = "0 0 12px var(--accent-cyan)";
+      } catch (e) {
+        console.warn("[BLE] Telemetry parse error:", e);
+      }
+    }
+
+    function disconnectBluetooth() {
+      if (bleDevice && bleDevice.gatt && bleDevice.gatt.connected) {
+        bleDevice.gatt.disconnect();
+      }
+      onBleDisconnected();
+    }
+
+    function onBleDisconnected() {
+      isBleConnected = false;
+      bleDevice = null;
+      bleServer = null;
+      bleCharacteristic = null;
+      resetBleUI();
+      connStatus.textContent = "Standby (Bluetooth Disconnected)";
+      connBadge.style.borderColor = "rgba(245, 158, 11, 0.4)";
+      statusDot.style.backgroundColor = "var(--o2-yellow)";
+      statusDot.style.boxShadow = "0 0 8px var(--o2-yellow)";
+    }
+
+    function resetBleUI() {
+      if (bleConnectBtn) {
+        bleConnectBtn.style.background = "rgba(6, 182, 212, 0.12)";
+        bleConnectBtn.style.borderColor = "rgba(6, 182, 212, 0.35)";
+        bleConnectBtn.style.color = "#38bdf8";
+      }
+      if (bleText) bleText.textContent = "Connect Bluetooth";
+      if (bleIcon) bleIcon.textContent = "⚡";
+    }
+
+    // ==========================================
     // Real-Time High-Speed MQTT Connection over Secure WebSocket
     // HiveMQ Public Broker: broker.hivemq.com:8884 (Sub-20ms latency, zero rate limits)
     // ==========================================
@@ -1332,7 +1455,7 @@
 
     // Hardware Telemetry Watchdog: If no packet arrives for > 5 seconds, indicate standby
     setInterval(() => {
-      if (isSimulating) return;
+      if (isSimulating || isBleConnected) return;
       const elapsed = Date.now() - lastPacketReceivedTimestamp;
       if (lastPacketReceivedTimestamp > 0 && elapsed > 4500) {
         connStatus.textContent = 'Standby (Waiting for ESP32)';
@@ -1345,7 +1468,7 @@
     // Fallback: Backup Poller to /data (in case browser network restricts WebSockets)
     let isPolling = false;
     setInterval(async () => {
-      if (isSimulating || isPolling) return;
+      if (isSimulating || isPolling || isBleConnected) return;
       isPolling = true;
 
       try {
