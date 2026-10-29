@@ -22,8 +22,8 @@
 // ==========================================
 // 1. Wi-Fi & Network Configuration
 // ==========================================
-const char* WIFI_SSID     = "Rushikesh";      // Wi-Fi SSID
-const char* WIFI_PASSWORD = "";           // Open Wi-Fi (No Password)
+const char* WIFI_SSID     = "DMIHER";         // Laptop Wi-Fi SSID
+const char* WIFI_PASSWORD = "Jio@1234";       // Wi-Fi Password
 
 // Web Server on Port 80 & WebSocket on /ws
 AsyncWebServer server(80);

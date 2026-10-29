@@ -29,8 +29,18 @@ Adafruit_ST7789 tft = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_RST);
 // ==========================================
 // 2. Wi-Fi & Network Configuration
 // ==========================================
-const char* WIFI_SSID   = "Rushikesh";
-const char* WIFI_PASS   = "";
+struct WifiNetworkConfig {
+  const char* ssid;
+  const char* pass;
+};
+
+// Auto-Connect Networks: Primary is laptop network (DMIHER), secondary is hotspot (Rushikesh)
+const WifiNetworkConfig KNOWN_NETWORKS[] = {
+  { "DMIHER",     "Jio@1234" },
+  { "Rushikesh",  "" },
+  { "Rushikesh ", "" }
+};
+const int NUM_KNOWN_NETWORKS = sizeof(KNOWN_NETWORKS) / sizeof(KNOWN_NETWORKS[0]);
 
 // High-speed MQTT Broker (Sub-20ms latency, zero rate-limiting)
 const char* MQTT_BROKER = "broker.hivemq.com";
@@ -342,15 +352,17 @@ void telemetryTask(void *pvParameters) {
 
       if (lastWifiAttempt == 0 || (now - lastWifiAttempt >= 5000)) {
         lastWifiAttempt = now;
-        static int retryCount = 0;
-        const char* trySsid = ((retryCount++ % 3) == 2) ? "Rushikesh " : "Rushikesh";
-        Serial.printf("[WiFi] Attempting connection to '%s'...\n", trySsid);
-        WiFi.begin(trySsid, WIFI_PASS);
+        static int netIndex = 0;
+        const WifiNetworkConfig& net = KNOWN_NETWORKS[netIndex % NUM_KNOWN_NETWORKS];
+        netIndex++;
+        Serial.printf("[WiFi] Attempting connection to '%s'...\n", net.ssid);
+        WiFi.begin(net.ssid, net.pass);
       }
     } else {
       if (!wifiIsConnected) {
         wifiIsConnected = true;
-        Serial.println("\n[WiFi] Connected successfully! Local IP: " + WiFi.localIP().toString());
+        Serial.println("\n[WiFi] Connected successfully to: " + WiFi.SSID());
+        Serial.println("[WiFi] Local IP: " + WiFi.localIP().toString());
       }
     }
 
