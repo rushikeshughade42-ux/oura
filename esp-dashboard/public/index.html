@@ -894,11 +894,21 @@
     }
 
     // ==========================================
-    // 60 FPS Hardware-Accelerated Lerp Render Loop
+    // 60 FPS Hardware-Accelerated Adaptive Lerp Render Loop
     // ==========================================
     function lerpTelemetryLoop() {
-      // Lerp factor: 0.22 ensures smooth 60 FPS gliding matching physical ST7789 display
-      const factor = isSimulating ? 0.35 : 0.22;
+      // Dynamic Adaptive Lerp Engine:
+      // When delta is large (user pressing syringe / fast movement), track aggressively (0.62) to eliminate latency!
+      // When delta is small, glide gently (0.32) to eliminate jitter and micro-shaking.
+      const dO2 = Math.abs(targetO2 - displayO2);
+      let factor = 0.30;
+      if (isBleConnected) {
+        factor = (dO2 > 1.5) ? 0.62 : 0.38; // Ultra-fast tracking for direct Bluetooth!
+      } else if (isSimulating) {
+        factor = 0.45;
+      } else {
+        factor = (dO2 > 3.0) ? 0.52 : 0.30;
+      }
 
       displayO2 += (targetO2 - displayO2) * factor;
       displayBar += (targetBar - displayBar) * factor;
